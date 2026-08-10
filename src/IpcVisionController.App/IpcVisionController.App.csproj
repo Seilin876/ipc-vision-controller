@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    WinForms 外殼 / WinForms shell.
+    僅負責畫面與執行緒封送；所有商業邏輯留在 Core。
+    Responsible only for rendering and thread marshalling; all business logic lives in Core.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>IpcVisionController.App</RootNamespace>
+    <AssemblyName>IpcVisionController</AssemblyName>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationVisualStyles>true</ApplicationVisualStyles>
+    <ApplicationUseCompatibleTextRendering>false</ApplicationUseCompatibleTextRendering>
+    <!-- 產線 IPC 常無網路，發佈時自帶執行環境 / Line IPCs are often offline: self-contained publish -->
+    <SelfContained>false</SelfContained>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\IpcVisionController.Core\IpcVisionController.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="recipe.sample.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

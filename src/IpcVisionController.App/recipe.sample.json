@@ -1,0 +1,8 @@
+{
+  // 範例配方 / Sample recipe.
+  // 現場檔為輸出目錄下的 recipe.json（不進版控）；首次啟動會自動產生預設值。
+  // The live file is recipe.json in the output directory (not versioned); the first
+  // start writes a default automatically. Copy this file over it to try other models.
+  "ModelName": "MODEL-A",
+  "BarcodeLength": 12
+}

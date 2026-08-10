@@ -1,0 +1,25 @@
+<Project>
+
+  <!-- 全專案共用建置設定 / Build settings shared by every project in the solution -->
+  <PropertyGroup>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 產線軟體：警告視為錯誤，避免帶著已知瑕疵出機 -->
+    <!-- Production-line software: warnings are errors, so no known defects ship -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <Company>Manufacturing Automation</Company>
+    <Product>IPC Vision Controller</Product>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+
+  <!-- 集中管理套件版本 / Central package versions -->
+  <PropertyGroup>
+    <MicrosoftDataSqliteVersion>8.0.10</MicrosoftDataSqliteVersion>
+    <XunitVersion>2.9.2</XunitVersion>
+    <TestSdkVersion>17.11.1</TestSdkVersion>
+  </PropertyGroup>
+
+</Project>

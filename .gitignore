@@ -1,0 +1,12 @@
+# 建置產物 / Build output
+bin/
+obj/
+*.user
+.vs/
+
+# 執行期資料：資料庫與現場配方不進版控 / Runtime data: DB and live recipe are not versioned
+data/
+*.db
+*.db-wal
+*.db-shm
+recipe.json

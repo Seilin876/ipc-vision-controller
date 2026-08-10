@@ -1,0 +1,116 @@
+# 執行需求 / Requirements
+#
+# 注意：本專案是 .NET (C#)，套件相依由 csproj + NuGet 自動還原，
+# 這個檔案不是 pip 清單，不能用 `pip install -r` 安裝。
+# 它列的是「在 Windows 機器上建置與執行前，人要先裝好什麼」。
+# NOTE: this is a .NET (C#) project. Package dependencies are restored automatically
+# from the csproj files by NuGet — this file is NOT a pip manifest and cannot be
+# installed with `pip install -r`. It lists what a human must install first.
+
+
+## 1. 作業系統 / Operating system
+
+Windows 10 21H2 x64 以上（Windows 11 亦可）
+Windows 10 21H2 x64 or newer (Windows 11 is fine)
+
+原因 / Why:
+IpcVisionController.App 目標框架為 net8.0-windows 且啟用 WinForms，
+只能在 Windows 上執行。IpcVisionController.Core 為 net8.0，無平台相依，
+可在 macOS / Linux 上單獨建置與測試。
+The App targets net8.0-windows with WinForms and runs on Windows only. Core targets
+plain net8.0 with no platform dependency and can be built and tested on macOS / Linux.
+
+
+## 2. .NET SDK
+
+.NET SDK 8.0.100 以上（8.0.4xx LTS 為建議版本）
+.NET SDK 8.0.100 or newer (8.0.4xx LTS recommended)
+
+下載 / Download:
+  https://dotnet.microsoft.com/download/dotnet/8.0
+
+或用 winget 安裝 / Or install with winget:
+  winget install Microsoft.DotNet.SDK.8
+
+安裝後確認 / Verify:
+  dotnet --list-sdks
+
+若機器上只有 .NET 9 / 10 SDK 也可以建置 net8.0，
+但需確保未被 global.json 綁定到不存在的版本（本專案沒有 global.json）。
+A .NET 9 / 10 SDK can also build net8.0 targets; just make sure no global.json pins a
+version that is not installed (this project ships no global.json).
+
+只要執行、不需建置的產線 IPC / For a line IPC that only runs the app, not builds it:
+  .NET Desktop Runtime 8.0（非 SDK）
+  winget install Microsoft.DotNetDesktopRuntime.8
+  原因：csproj 設定 SelfContained=false，發佈檔不自帶執行環境。
+  Why: the csproj sets SelfContained=false, so the published output has no bundled runtime.
+
+
+## 3. NuGet 套件 / NuGet packages
+
+以下由 `dotnet restore` 自動取得，版本集中定義在 Directory.Build.props，
+不需手動安裝，但離線機器需事先在有網路的環境還原過。
+Restored automatically by `dotnet restore`; versions are centralised in
+Directory.Build.props. No manual install needed, but an offline machine must have
+restored once while online.
+
+  Microsoft.Data.Sqlite          8.0.10    追溯資料庫 / traceability database
+  Microsoft.NET.Test.Sdk        17.11.1    測試主機 / test host
+  xunit                          2.9.2     測試框架 / test framework
+  xunit.runner.visualstudio      2.8.2     測試執行器 / test runner
+
+Microsoft.Data.Sqlite 自帶原生 SQLite（SQLitePCLRaw），
+產線 IPC 不需另外安裝 SQLite。
+Microsoft.Data.Sqlite bundles native SQLite via SQLitePCLRaw, so the line IPC needs
+no separate SQLite installation.
+
+
+## 4. 建置與測試指令 / Build and test commands
+
+在方案根目錄執行 / Run from the solution root:
+
+  dotnet restore
+  dotnet build   IpcVisionController.sln -c Release
+  dotnet test    tests/IpcVisionController.Core.Tests -c Release
+  dotnet run  --project src/IpcVisionController.App -c Release
+
+發佈給產線 / Publish for the line:
+
+  dotnet publish src/IpcVisionController.App -c Release -r win-x64 --self-contained false -o publish
+
+注意：Directory.Build.props 設定 TreatWarningsAsErrors=true，
+任何編譯警告都會讓建置失敗 —— 這是刻意的，不要為了通過建置而關掉它。
+NOTE: Directory.Build.props sets TreatWarningsAsErrors=true, so any compiler warning
+fails the build. This is deliberate; do not switch it off just to get a green build.
+
+
+## 5. 選用 / Optional
+
+Visual Studio 2022 17.8 以上，需勾選「.NET 桌面開發」工作負載
+Visual Studio 2022 17.8+ with the ".NET desktop development" workload
+  —— 只用 dotnet CLI 也能完整建置、測試與發佈，VS 非必要。
+  —— the dotnet CLI alone covers build, test and publish; VS is not required.
+
+DB Browser for SQLite —— 現場查看 inspection.db 的追溯紀錄
+DB Browser for SQLite — to inspect the traceability records in inspection.db
+  winget install DBBrowserForSQLite.DBBrowserForSQLite
+
+
+## 6. 實機硬體（目前為模擬，尚未需要）/ Real hardware (currently mocked, not yet needed)
+
+目前 Program.cs 組裝的是 Mock 裝置，不需任何硬體或 SDK 即可試機。
+換成實機時才需要以下項目 / The following are only needed when swapping in real devices:
+
+  台達 R1-EC5500D1 EtherCAT 步進驅動 + EtherCAT 主站程式庫
+  Delta R1-EC5500D1 EtherCAT stepper drive + an EtherCAT master library
+    （例如 Delta DIALink SDK 或 SOEM / e.g. Delta DIALink SDK or SOEM）
+  Keyence IV4 影像判別感測器（Ethernet，預設埠 8500）
+  Keyence IV4 vision sensor (Ethernet, default port 8500)
+  Keyence SR 系列條碼讀取器（Ethernet，預設埠 9004）
+  Keyence SR series barcode scanner (Ethernet, default port 9004)
+
+替換位置只在 src/IpcVisionController.App/Program.cs 的三個 new，
+其餘程式碼不需改動 —— 這是 HAL 介面存在的理由。
+The swap is confined to the three `new` expressions in Program.cs; no other code
+changes. That is the whole point of the HAL interfaces.
