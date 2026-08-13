@@ -1,11 +1,23 @@
 # 建置產物 / Build output
 bin/
 obj/
+publish/
 *.user
 .vs/
 
 # 執行期資料：資料庫與現場配方不進版控 / Runtime data: DB and live recipe are not versioned
-data/
+#
+# 這裡刻意「不」寫 data/ —— 在大小寫不敏感的檔案系統上（macOS APFS、Windows NTFS）
+# git 會設 core.ignorecase=true，連 gitignore 比對也變成不分大小寫，
+# data/ 會誤中原始碼目錄 Data/ 並把 DatabaseManager.cs 靜默排除在版控之外。
+# 執行期資料庫本來就落在 bin/ 或 publish/ 底下，已被上面兩行涵蓋，
+# 下面的 *.db 再兜住任何位置的資料庫檔，因此 data/ 是多餘且有害的。
+# Deliberately NO `data/` rule here. On a case-insensitive file system (macOS APFS,
+# Windows NTFS) git sets core.ignorecase=true, which makes gitignore matching
+# case-insensitive too — so `data/` also matches the source folder `Data/` and
+# silently drops DatabaseManager.cs from version control. The runtime database lands
+# under bin/ or publish/, already covered above, and the *.db rule below catches the
+# file wherever it ends up. `data/` was redundant and harmful.
 *.db
 *.db-wal
 *.db-shm
