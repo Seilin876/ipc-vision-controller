@@ -598,6 +598,53 @@ public sealed class InspectionSequencerTests : IDisposable
         Assert.Fail($"等待逾時 / Timed out waiting for: {description}");
     }
 
+    /// <summary>
+    /// 以「原點復歸卡住」把機台推入 Faulted / Drive the rig into Faulted through a stalled home.
+    ///
+    /// 必須先把軸推離原點:HomeAsync 的目標是 0,若軸已停在 0,
+    /// MoveToAsync 的等待迴圈一次都不會執行,SimulateStall 就卡不住任何東西,
+    /// 初始化反而會成功 —— 這是本輔助方法最容易寫錯的地方。
+    /// The axis has to be parked off zero first: HomeAsync targets 0, and if the axis is
+    /// already sitting there the move loop never executes, so SimulateStall would stall
+    /// nothing and initialisation would succeed instead. This is the easy mistake here.
+    ///
+    /// homeTimeout 為 null 時由 <see cref="SequencerOptions.MoveTimeout"/> 把關,
+    /// 走的是設備逾時路徑(DeviceTimeoutException);
+    /// 給值時改由呼叫端的權杖取消,讓站別設定得以留寬而故障仍然來得快。
+    /// 兩者的差別正是 WithTimeoutAsync 用外層權杖狀態所區分的「設備逾時」與「操作員停機」。
+    /// With homeTimeout null the sequencer's own MoveTimeout is the guard, taking the
+    /// device-timeout path (DeviceTimeoutException). When supplied, the caller's token
+    /// cancels instead, so the options can stay generous while the fault still arrives
+    /// promptly. The two are precisely the device-timeout versus operator-stop cases that
+    /// WithTimeoutAsync separates by inspecting the outer token.
+    /// </summary>
+    private static async Task FaultViaStalledHomingAsync(Rig rig, TimeSpan? homeTimeout = null)
+    {
+        // 手動連線致能,才能在初始化前先把軸移離原點 / Connect and enable by hand so the
+        // axis can be moved off zero before initialisation runs.
+        await rig.Motor.ConnectAsync(CancellationToken.None);
+        await rig.Motor.EnableAsync(CancellationToken.None);
+        await rig.Motor.MoveToAsync(
+            rig.Options.ScanPositionPulse,
+            rig.Options.MoveSpeedPulsePerSecond,
+            CancellationToken.None);
+
+        rig.Motor.SimulateStall = true;
+
+        if (homeTimeout is null)
+        {
+            await Assert.ThrowsAsync<DeviceTimeoutException>(() => rig.Sequencer.InitializeAsync());
+        }
+        else
+        {
+            using var cts = new CancellationTokenSource(homeTimeout.Value);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => rig.Sequencer.InitializeAsync(cts.Token));
+        }
+
+        Assert.Equal(MachineState.Faulted, rig.Sequencer.State);
+    }
+
     /// <summary>受測組合 / The assembled system under test, plus the handles a test needs to poke it.</summary>
     private sealed class Rig : IAsyncDisposable
     {
