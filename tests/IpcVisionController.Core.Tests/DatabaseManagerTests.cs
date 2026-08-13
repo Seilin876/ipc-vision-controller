@@ -1,5 +1,6 @@
 using IpcVisionController.Core.Data;
 using IpcVisionController.Core.Models;
+using Xunit;
 
 namespace IpcVisionController.Core.Tests;
 
