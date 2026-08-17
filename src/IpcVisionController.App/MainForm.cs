@@ -35,6 +35,8 @@ internal sealed class MainForm : Form
 
     private readonly Button _initializeButton = new() { Text = "初始化 Initialize", Width = 150, Height = 40 };
     private readonly Button _startButton = new() { Text = "開始 Start", Width = 120, Height = 40, Enabled = false };
+    // 試機用：跑一格就停,逐格核對判定 / Dry runs: one pitch per press, verdict checked each time
+    private readonly Button _triggerButton = new() { Text = "單次觸發 Trigger once", Width = 170, Height = 40, Enabled = false };
     private readonly Button _stopButton = new() { Text = "停止 Stop", Width = 120, Height = 40, Enabled = false };
     private readonly Button _resetButton = new() { Text = "解除故障 Reset", Width = 150, Height = 40, Enabled = false };
 
@@ -177,7 +179,7 @@ internal sealed class MainForm : Form
             Padding = new Padding(8),
             WrapContents = false,
         };
-        commandPanel.Controls.AddRange([_initializeButton, _startButton, _stopButton, _resetButton]);
+        commandPanel.Controls.AddRange([_initializeButton, _triggerButton, _startButton, _stopButton, _resetButton]);
 
         var statusPanel = new TableLayoutPanel
         {
@@ -256,6 +258,7 @@ internal sealed class MainForm : Form
     private void WireEvents()
     {
         _initializeButton.Click += OnInitializeClicked;
+        _triggerButton.Click += OnTriggerOnceClicked;
         _startButton.Click += OnStartClicked;
         _stopButton.Click += OnStopClicked;
         _resetButton.Click += OnResetClicked;
@@ -284,6 +287,31 @@ internal sealed class MainForm : Form
         catch (Exception ex)
         {
             ShowError("初始化失敗 / Initialisation failed", ex);
+        }
+        finally
+        {
+            ApplyStateToCommands(_sequencer.State);
+        }
+    }
+
+    /// <summary>
+    /// 單次觸發 / Trigger exactly one cycle.
+    /// 期間全數停用命令鈕：連按會讓料帶多送一格而該格從未被檢測,
+    /// 狀態機那一層也擋,但擋在 UI 才不會讓操作員收到看不懂的狀態例外。
+    /// Every command button is disabled while it runs: a double-press advances the web by
+    /// an uninspected pitch. The state machine refuses it too, but refusing it here spares
+    /// the operator an illegal-transition exception they cannot act on.
+    /// </summary>
+    private async void OnTriggerOnceClicked(object? sender, EventArgs e)
+    {
+        SetCommandsEnabled(false);
+        try
+        {
+            await _sequencer.TriggerOnceAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            ShowError("單次觸發失敗 / Trigger failed", ex);
         }
         finally
         {
@@ -501,6 +529,7 @@ internal sealed class MainForm : Form
     private void ApplyStateToCommands(MachineState state)
     {
         _initializeButton.Enabled = state == MachineState.Offline;
+        _triggerButton.Enabled = state == MachineState.Idle;
         _startButton.Enabled = state == MachineState.Idle;
         _stopButton.Enabled = state == MachineState.Running;
         _resetButton.Enabled = state == MachineState.Faulted;
@@ -512,6 +541,7 @@ internal sealed class MainForm : Form
     private void SetCommandsEnabled(bool enabled)
     {
         _initializeButton.Enabled = enabled;
+        _triggerButton.Enabled = enabled;
         _startButton.Enabled = enabled;
         _stopButton.Enabled = enabled;
         _resetButton.Enabled = enabled;

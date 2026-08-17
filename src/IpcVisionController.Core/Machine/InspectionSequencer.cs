@@ -272,6 +272,68 @@ public sealed class InspectionSequencer : IAsyncDisposable
     }
 
     /// <summary>
+    /// 執行單一週期後回到待命 / Run exactly one cycle, then return to Idle.
+    ///
+    /// 試機與印刷調機用：跑一格就停,操作員能逐格核對判定與判退原因。
+    /// For dry runs and dialling in a print job: one pitch per press, so each verdict and
+    /// reject reason can be checked before the next label moves.
+    ///
+    /// 為什麼不讓呼叫端直接用 <see cref="RunCycleAsync"/> /
+    /// Why callers must not simply call <see cref="RunCycleAsync"/>:
+    /// 後者不看狀態也不互斥,連按兩下就會有兩個週期重疊,對同一顆馬達連下兩次進給命令
+    /// —— 料帶多送一格,而那一格從未被檢測就流到下游。此處先佔住 Running,第二次呼叫
+    /// 因狀態不符而被擋下,互斥由狀態機本身提供,不另設旗標。
+    /// RunCycleAsync neither checks the state nor excludes concurrent callers, so a
+    /// double-click overlaps two cycles and issues two feeds to one motor: the web
+    /// advances a pitch that is never inspected and still reaches the next station.
+    /// Claiming Running first makes the second call fail the state check, so mutual
+    /// exclusion comes from the state machine itself rather than a separate flag.
+    /// </summary>
+    /// <returns>
+    /// 本次的檢測紀錄；期間被停機或故障中斷則為 null /
+    /// This cycle's record, or null when a stop or a fault intervened.
+    /// </returns>
+    public async Task<InspectionRecord?> TriggerOnceAsync(CancellationToken cancellationToken = default)
+    {
+        TransitionTo(MachineState.Running, from: MachineState.Idle);
+
+        // 與連續生產共用 _runCts/_runTask,讓 StopAsync 能一視同仁地中止單次觸發
+        // Share _runCts/_runTask with cycling so StopAsync cancels a single shot too.
+        _runCts?.Dispose();
+        _runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        var task = RunSingleCycleAsync(_runCts.Token);
+        _runTask = task;
+        return await task.ConfigureAwait(false);
+    }
+
+    private async Task<InspectionRecord?> RunSingleCycleAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var record = await RunCycleAsync(cancellationToken).ConfigureAwait(false);
+
+            // 用 Try 而非直接轉移：期間若已被 StopAsync 轉為 Stopping、或故障轉為 Faulted,
+            // 這裡不得把狀態搶回 Idle 蓋掉它們 —— 那會讓故障機台看起來可以繼續生產。
+            // Try rather than a plain transition: if StopAsync moved us to Stopping, or a
+            // fault to Faulted, this must not snatch the state back to Idle over them —
+            // that would make a faulted machine look ready to run.
+            TryTransitionTo(MachineState.Idle, from: MachineState.Running);
+            return record;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 操作員停機,狀態由 StopAsync 收尾 / Operator stop; StopAsync settles the state.
+            return null;
+        }
+        catch (Exception ex)
+        {
+            await FaultAsync($"{ex.GetType().Name}: {ex.Message}").ConfigureAwait(false);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// 執行單一檢測週期 / Run exactly one inspection cycle.
     /// 供背景迴圈與單元測試共用 —— 測試打的是產線真正跑的那段程式碼。
     /// Shared by the background loop and the unit tests, so tests exercise the same
@@ -451,13 +513,31 @@ public sealed class InspectionSequencer : IAsyncDisposable
 
     private void TransitionTo(MachineState target, MachineState from)
     {
+        if (!TryTransitionTo(target, from))
+        {
+            throw new InvalidOperationException(string.Create(CultureInfo.InvariantCulture,
+                $"狀態不允許此操作：目前 {State},需為 {from} / Illegal transition: state is {State}, requires {from}."));
+        }
+    }
+
+    /// <summary>
+    /// 嘗試轉移狀態,不合法時回報失敗而非拋例外 /
+    /// Attempt a transition, reporting failure instead of throwing.
+    ///
+    /// 檢查與寫入必須在同一個鎖內：分成兩段的話兩個呼叫端會同時通過檢查,
+    /// 互斥就失效了 —— 這正是單次觸發用來擋連按的機制。
+    /// The check and the write must share one lock. Split across two, two callers both
+    /// pass the check and the exclusion is gone — and that exclusion is exactly what
+    /// stops a double-press from running two cycles at once.
+    /// </summary>
+    private bool TryTransitionTo(MachineState target, MachineState from)
+    {
         MachineState previous;
         lock (_stateGate)
         {
             if (_state != from)
             {
-                throw new InvalidOperationException(string.Create(CultureInfo.InvariantCulture,
-                    $"狀態不允許此操作：目前 {_state},需為 {from} / Illegal transition: state is {_state}, requires {from}."));
+                return false;
             }
 
             previous = _state;
@@ -465,6 +545,7 @@ public sealed class InspectionSequencer : IAsyncDisposable
         }
 
         Raise(StateChanged, new StateChangedEventArgs(previous, target, reason: null));
+        return true;
     }
 
     private void Log(string message) => Raise(LogEmitted, new SequencerLogEventArgs(message));

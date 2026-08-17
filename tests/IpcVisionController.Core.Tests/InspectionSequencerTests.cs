@@ -592,6 +592,149 @@ public sealed class InspectionSequencerTests : IDisposable
         await rig.Sequencer.DisposeAsync();
     }
 
+    // ── 單次觸發 / Single-shot trigger ───────────────────────────────────────
+
+    [Fact]
+    public async Task TriggerOnceAsync_RunsOneCycleAndReturnsToIdle()
+    {
+        await using var rig = NewRig();
+        await rig.Sequencer.InitializeAsync();
+        rig.Reader.ForcedCodes = ["ABC123456789"];
+        rig.Verifier.ForcedTexts = ["LOT26A"];
+
+        var record = await rig.Sequencer.TriggerOnceAsync();
+
+        Assert.NotNull(record);
+        Assert.Equal(Verdict.Pass, record!.FinalJudge);
+        Assert.Equal(1, rig.Sequencer.CycleCount);
+        Assert.Single(rig.Store.Snapshot());
+
+        // 回到 Idle 才能再按下一次,停在 Running 會讓試機只能觸發一格就卡死
+        // Returning to Idle is what allows a second press; stuck in Running, a dry run
+        // gets exactly one label and then nothing.
+        Assert.Equal(MachineState.Idle, rig.Sequencer.State);
+        Assert.Equal(
+            new[] { MachineState.Running, MachineState.Idle },
+            rig.States()[^2..]);
+    }
+
+    [Fact]
+    public async Task TriggerOnceAsync_FeedsOnePitchAndThenLeavesTheWebAlone()
+    {
+        await using var rig = NewRig();
+        await rig.Sequencer.InitializeAsync();
+
+        await rig.Sequencer.TriggerOnceAsync();
+
+        // 這是單次觸發與「開始」的唯一分野。一個週期約 20 ms,所以若它其實還在跑,
+        // 這段等待足夠讓料帶多走好幾格。變成連續生產就無法逐格核對判定 ——
+        // 而逐格核對正是試機與印刷調機唯一有用的模式。
+        // The one distinction from Start. A cycle takes roughly 20 ms, so if the loop were
+        // still running this wait is long enough for several more pitches. Decaying into
+        // cycling removes the only mode that is useful for a dry run or a print setup:
+        // one verdict checked at a time.
+        await Task.Delay(TimeSpan.FromMilliseconds(200));
+
+        Assert.Equal(rig.Options.FeedPitchPulses, rig.Motor.CurrentPosition);
+        Assert.Equal(1, rig.Sequencer.CycleCount);
+        Assert.Equal(MachineState.Idle, rig.Sequencer.State);
+    }
+
+    [Fact]
+    public async Task TriggerOnceAsync_BeforeInitialize_IsRejected()
+    {
+        await using var rig = NewRig();
+
+        // 尚未連線與對標就進給,料帶位置無從得知
+        // Feeding before the link is up and the web is aligned moves stock to an unknown place.
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => rig.Sequencer.TriggerOnceAsync());
+
+        Assert.Equal(MachineState.Offline, rig.Sequencer.State);
+        Assert.Equal(0, rig.Motor.CurrentPosition);
+    }
+
+    [Fact]
+    public async Task TriggerOnceAsync_WhenOneIsAlreadyInFlight_IsRejected()
+    {
+        await using var rig = NewRig();
+        await rig.Sequencer.InitializeAsync();
+        rig.Reader.ForcedLatency = TimeSpan.FromMilliseconds(250);
+
+        var inFlight = rig.Sequencer.TriggerOnceAsync();
+
+        // 連按第二下必須被擋下：兩個週期重疊會對同一顆馬達連下兩次進給,
+        // 料帶多送一格,而那一格從未被檢測就流到下游。
+        // The second press must be refused: two overlapping cycles issue two feeds to one
+        // motor, so the web advances a pitch that is never inspected and still reaches
+        // the next station.
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => rig.Sequencer.TriggerOnceAsync());
+
+        Assert.NotNull(await inFlight);
+        Assert.Equal(rig.Options.FeedPitchPulses, rig.Motor.CurrentPosition);
+        Assert.Equal(1, rig.Sequencer.CycleCount);
+    }
+
+    [Fact]
+    public async Task TriggerOnceAsync_WhenADeviceReportsItsOwnFault_StopsTheLine()
+    {
+        await using var rig = NewRig();
+        await rig.Sequencer.InitializeAsync();
+        rig.Reader.SimulateFault = true;
+
+        // 單次觸發吸收例外並轉為故障狀態,而非上拋：按鈕的呼叫端是 UI,
+        // 讓設備異常變成一個對話框而機台仍顯示待命,是最糟的組合。
+        // The single shot absorbs the exception into the fault state rather than rethrowing:
+        // its caller is a UI, and turning an equipment fault into a dialog box while the
+        // machine still reads Ready is the worst of both.
+        var record = await rig.Sequencer.TriggerOnceAsync();
+
+        Assert.Null(record);
+        Assert.Equal(MachineState.Faulted, rig.Sequencer.State);
+        Assert.Contains(nameof(DeviceFaultException), rig.Sequencer.FaultReason!, StringComparison.Ordinal);
+        Assert.Empty(rig.Store.Snapshot());
+    }
+
+    [Fact]
+    public async Task TriggerOnceAsync_WhenTheOperatorStopsMidCycle_LeavesNoRecord()
+    {
+        await using var rig = NewRig();
+        await rig.Sequencer.InitializeAsync();
+        rig.Reader.ForcedLatency = TimeSpan.FromMilliseconds(400);
+
+        var inFlight = rig.Sequencer.TriggerOnceAsync();
+        await rig.Sequencer.StopAsync();
+
+        // 未完成判定的工件不該留下追溯資料,單次觸發與連續生產在這點上必須一致
+        // An unjudged part must not leave traceability data behind, and a single shot has
+        // to agree with cycling on that.
+        Assert.Null(await inFlight);
+        Assert.Empty(rig.Store.Snapshot());
+        Assert.Equal(MachineState.Idle, rig.Sequencer.State);
+        Assert.Equal(0, rig.Sequencer.CycleCount);
+    }
+
+    [Fact]
+    public async Task TriggerOnceAsync_ThenStart_StillCycles()
+    {
+        await using var rig = NewRig();
+        await rig.Sequencer.InitializeAsync();
+
+        await rig.Sequencer.TriggerOnceAsync();
+        rig.Sequencer.Start();
+
+        // 試機用單次觸發驗完就直接轉連續生產,不該逼操作員重新初始化
+        // A dry run ends by handing straight over to production; the operator should not
+        // have to re-initialise in between.
+        await WaitUntilAsync(
+            () => rig.Sequencer.CycleCount >= 3,
+            "單次觸發後仍能連續生產 / cycling to continue after a single shot");
+
+        await rig.Sequencer.StopAsync();
+        Assert.Equal(MachineState.Idle, rig.Sequencer.State);
+    }
+
     // ── 測試腳手架 / Test scaffolding ────────────────────────────────────────
 
     /// <summary>
