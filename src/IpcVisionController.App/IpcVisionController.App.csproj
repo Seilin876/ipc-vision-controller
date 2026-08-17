@@ -17,6 +17,8 @@
     <!-- 產線 IPC 常無網路，發佈時自帶執行環境 / Line IPCs are often offline: self-contained publish -->
     <SelfContained>false</SelfContained>
     <PlatformTarget>x64</PlatformTarget>
+    <!-- exe 的 Win32 圖示：檔案總管、工作列釘選、Alt-Tab / The exe's Win32 icon: Explorer, taskbar pins, Alt-Tab -->
+    <ApplicationIcon>delta.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -25,6 +27,19 @@
 
   <ItemGroup>
     <None Update="recipe.sample.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      同一個 .ico 也內嵌成資源，供 MainForm 設定視窗圖示 /
+      The same .ico is embedded as a resource for MainForm to set the window icon.
+      ApplicationIcon 只影響 exe 的 Win32 資源，不會自動成為表單的 Icon；
+      名稱寫死是為了讓 MainForm 的查詢字串與此處一眼對得起來。
+      ApplicationIcon only writes the exe's Win32 resource and does not become the
+      form's Icon on its own. The logical name is pinned so that MainForm's lookup
+      string lines up with this line at a glance.
+    -->
+    <EmbeddedResource Include="delta.ico" LogicalName="IpcVisionController.App.delta.ico" />
   </ItemGroup>
 
 </Project>

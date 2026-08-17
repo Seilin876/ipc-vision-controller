@@ -14,31 +14,33 @@ namespace IpcVisionController.Core.Machine;
 /// </summary>
 public sealed class SequencerOptions
 {
-    /// <summary>讀碼位置（脈波）/ Barcode-read position in pulses.</summary>
-    public int ScanPositionPulse { get; init; } = 10_000;
+    /// <summary>
+    /// 一格標籤的進給量（脈波）/ Pulses in one label pitch.
+    /// 由標籤間距與傳動比決定,屬於機構參數;標籤規格改變時才需要重算。
+    /// Derived from the label pitch and the drive ratio — a mechanical parameter,
+    /// recomputed only when the label stock itself changes.
+    /// </summary>
+    public int FeedPitchPulses { get; init; } = 10_000;
 
-    /// <summary>拍照位置（脈波）/ Vision-capture position in pulses.</summary>
-    public int InspectPositionPulse { get; init; } = 25_000;
+    /// <summary>進給速度（脈波/秒）/ Feed velocity in pulses per second.</summary>
+    public int FeedSpeedPulsePerSecond { get; init; } = 20_000;
 
-    /// <summary>移動速度（脈波/秒）/ Move velocity in pulses per second.</summary>
-    public int MoveSpeedPulsePerSecond { get; init; } = 20_000;
+    /// <summary>單次進給逾時 / Per-feed timeout.</summary>
+    public TimeSpan FeedTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
-    /// <summary>單次定位逾時 / Per-move timeout.</summary>
-    public TimeSpan MoveTimeout { get; init; } = TimeSpan.FromSeconds(10);
+    /// <summary>讀碼逾時 / Code-read timeout.</summary>
+    public TimeSpan CodeReadTimeout { get; init; } = TimeSpan.FromSeconds(3);
 
-    /// <summary>讀碼逾時 / Barcode read timeout.</summary>
-    public TimeSpan BarcodeTimeout { get; init; } = TimeSpan.FromSeconds(3);
-
-    /// <summary>拍照判別逾時 / Vision trigger timeout.</summary>
-    public TimeSpan VisionTimeout { get; init; } = TimeSpan.FromSeconds(3);
+    /// <summary>字符檢測逾時 / Character-verification timeout.</summary>
+    public TimeSpan CharacterVerifyTimeout { get; init; } = TimeSpan.FromSeconds(3);
 
     /// <summary>各裝置連線逾時 / Per-device connect timeout.</summary>
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(15);
 
     /// <summary>
-    /// 兩個工件之間的間隔 / Dwell between parts.
-    /// 實機應改為等待上游的「工件到位」訊號,而非固定延遲。
-    /// On real hardware, replace this with a wait on the upstream part-present signal
+    /// 兩格標籤之間的間隔 / Dwell between label pitches.
+    /// 實機應改為等待上游的「料帶到位」訊號,而非固定延遲。
+    /// On real hardware, replace this with a wait on the upstream web-in-position signal
     /// rather than a fixed delay.
     /// </summary>
     public TimeSpan CycleInterval { get; init; } = TimeSpan.FromMilliseconds(500);
@@ -52,16 +54,26 @@ public sealed class SequencerOptions
     /// <exception cref="ArgumentException">設定不合法 / A value is unusable.</exception>
     public void Validate()
     {
-        if (MoveSpeedPulsePerSecond <= 0)
+        // 進給量為 0 代表料帶不動,同一張標籤會被反覆檢測並反覆寫入追溯紀錄
+        // A zero pitch leaves the web still, so one label is inspected — and logged —
+        // over and over.
+        if (FeedPitchPulses <= 0)
         {
             throw new ArgumentException(
-                $"MoveSpeedPulsePerSecond 必須為正整數,目前為 {MoveSpeedPulsePerSecond} / must be positive.",
-                nameof(MoveSpeedPulsePerSecond));
+                $"FeedPitchPulses 必須為正整數,目前為 {FeedPitchPulses} / must be positive.",
+                nameof(FeedPitchPulses));
         }
 
-        EnsurePositive(MoveTimeout, nameof(MoveTimeout));
-        EnsurePositive(BarcodeTimeout, nameof(BarcodeTimeout));
-        EnsurePositive(VisionTimeout, nameof(VisionTimeout));
+        if (FeedSpeedPulsePerSecond <= 0)
+        {
+            throw new ArgumentException(
+                $"FeedSpeedPulsePerSecond 必須為正整數,目前為 {FeedSpeedPulsePerSecond} / must be positive.",
+                nameof(FeedSpeedPulsePerSecond));
+        }
+
+        EnsurePositive(FeedTimeout, nameof(FeedTimeout));
+        EnsurePositive(CodeReadTimeout, nameof(CodeReadTimeout));
+        EnsurePositive(CharacterVerifyTimeout, nameof(CharacterVerifyTimeout));
         EnsurePositive(ConnectTimeout, nameof(ConnectTimeout));
 
         if (CycleInterval < TimeSpan.Zero)

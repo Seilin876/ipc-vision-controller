@@ -88,8 +88,8 @@ public sealed class InspectionSequencer : IAsyncDisposable
     private static readonly TimeSpan SafetyStopTimeout = TimeSpan.FromSeconds(3);
 
     private readonly IMotorController _motor;
-    private readonly IBarcodeScanner _scanner;
-    private readonly IVisionSensor _vision;
+    private readonly ICodeReader _codeReader;
+    private readonly ICharacterVerifier _verifier;
     private readonly IInspectionStore _database;
     private readonly RecipeManager _recipes;
     private readonly SequencerOptions _options;
@@ -103,15 +103,15 @@ public sealed class InspectionSequencer : IAsyncDisposable
 
     public InspectionSequencer(
         IMotorController motor,
-        IBarcodeScanner scanner,
-        IVisionSensor vision,
+        ICodeReader codeReader,
+        ICharacterVerifier verifier,
         IInspectionStore database,
         RecipeManager recipes,
         SequencerOptions? options = null)
     {
         _motor = motor ?? throw new ArgumentNullException(nameof(motor));
-        _scanner = scanner ?? throw new ArgumentNullException(nameof(scanner));
-        _vision = vision ?? throw new ArgumentNullException(nameof(vision));
+        _codeReader = codeReader ?? throw new ArgumentNullException(nameof(codeReader));
+        _verifier = verifier ?? throw new ArgumentNullException(nameof(verifier));
         _database = database ?? throw new ArgumentNullException(nameof(database));
         _recipes = recipes ?? throw new ArgumentNullException(nameof(recipes));
 
@@ -159,27 +159,27 @@ public sealed class InspectionSequencer : IAsyncDisposable
                 $"{_motor.Name} 連線 / connect", _options.ConnectTimeout,
                 _motor.ConnectAsync, cancellationToken).ConfigureAwait(false);
             await WithTimeoutAsync(
-                $"{_scanner.Name} 連線 / connect", _options.ConnectTimeout,
-                _scanner.ConnectAsync, cancellationToken).ConfigureAwait(false);
+                $"{_codeReader.Name} 連線 / connect", _options.ConnectTimeout,
+                _codeReader.ConnectAsync, cancellationToken).ConfigureAwait(false);
             await WithTimeoutAsync(
-                $"{_vision.Name} 連線 / connect", _options.ConnectTimeout,
-                _vision.ConnectAsync, cancellationToken).ConfigureAwait(false);
+                $"{_verifier.Name} 連線 / connect", _options.ConnectTimeout,
+                _verifier.ConnectAsync, cancellationToken).ConfigureAwait(false);
 
             Log("伺服致能 / Enabling servo…");
             await WithTimeoutAsync(
                 "伺服致能 / servo enable", _options.ConnectTimeout,
                 _motor.EnableAsync, cancellationToken).ConfigureAwait(false);
 
-            Log("原點復歸 / Homing…");
+            Log("對齊定位標記 / Aligning to the registration mark…");
             await WithTimeoutAsync(
-                "原點復歸 / homing", _options.MoveTimeout,
+                "對標 / registration align", _options.FeedTimeout,
                 _motor.HomeAsync, cancellationToken).ConfigureAwait(false);
 
             await _database.InitializeAsync(cancellationToken).ConfigureAwait(false);
 
             var recipe = await _recipes.LoadAsync(cancellationToken).ConfigureAwait(false);
             Log(string.Create(CultureInfo.InvariantCulture,
-                $"配方載入 / Recipe loaded: {recipe.ModelName} (barcode length {recipe.BarcodeLength})"));
+                $"配方載入 / Recipe loaded: {recipe.ModelName} ({recipe.ExpectedCodeCount} code(s), {recipe.ExpectedCharacterRegionCount} region(s))"));
 
             TransitionTo(MachineState.Idle, from: MachineState.Initializing);
             Log("待命 / Ready.");
@@ -257,11 +257,12 @@ public sealed class InspectionSequencer : IAsyncDisposable
 
     /// <summary>
     /// 解除故障 / Clear a fault.
-    /// 回到 <see cref="MachineState.Offline"/> 而非 Idle：故障後裝置狀態與軸位置都不可信,
-    /// 必須重新初始化與復歸。
+    /// 回到 <see cref="MachineState.Offline"/> 而非 Idle：故障後裝置狀態與料帶對位都不可信
+    /// —— 卡料排除時料帶多半已被人手拉動,必須重新初始化並重新對標。
     /// Returns to <see cref="MachineState.Offline"/> rather than Idle: after a fault
-    /// neither the device links nor the axis position can be trusted, so a full
-    /// re-initialise and re-home is mandatory.
+    /// neither the device links nor the web's registration can be trusted — clearing a
+    /// jam almost always means the web was pulled by hand — so a full re-initialise and
+    /// re-align is mandatory.
     /// </summary>
     public void Reset()
     {
@@ -278,65 +279,52 @@ public sealed class InspectionSequencer : IAsyncDisposable
     /// </summary>
     public async Task<InspectionRecord> RunCycleAsync(CancellationToken cancellationToken)
     {
-        // 每個工件都重讀配方：換線後下一個工件立即生效
-        // Re-read the recipe per part, so a changeover takes effect on the very next part.
+        // 每張標籤都重讀配方：換線後下一張立即生效
+        // Re-read the recipe per label, so a changeover takes effect on the very next one.
         var recipe = _recipes.Current;
 
         await WithTimeoutAsync(
-            "移動至讀碼位 / move to scan position", _options.MoveTimeout,
-            token => _motor.MoveToAsync(_options.ScanPositionPulse, _options.MoveSpeedPulsePerSecond, token),
+            "進給一格 / feed one pitch", _options.FeedTimeout,
+            token => _motor.FeedAsync(_options.FeedPitchPulses, _options.FeedSpeedPulsePerSecond, token),
             cancellationToken).ConfigureAwait(false);
 
-        string? barcode = null;
-        string? visionResult = null;
-        string judge;
+        // 兩個感測器都觸發,不因其中一個先判退就略過另一個。
+        // 舊架構在讀碼失敗時略過拍照,省下的是「移動到拍照位」那一趟;
+        // 現在兩者共用同一次進給,沒有行程可省,而少一組結果就少一半的判退依據 ——
+        // 印刷調機時那正是操作員最需要看到的東西。
+        // Both sensors fire; neither is skipped because the other already found a reason
+        // to reject. The old design skipped the capture after a failed read to save the
+        // move to the inspect position — with a single feed serving both sensors there is
+        // no travel left to save, and dropping one result set halves the evidence behind
+        // the reject, which is exactly what an operator dialling in a print job needs.
+        var codeResults = await WithTimeoutAsync(
+            "讀碼 / code read", _options.CodeReadTimeout,
+            _codeReader.TriggerAsync, cancellationToken).ConfigureAwait(false);
 
-        try
-        {
-            barcode = await WithTimeoutAsync(
-                "讀碼 / barcode read", _options.BarcodeTimeout,
-                _scanner.ReadAsync, cancellationToken).ConfigureAwait(false);
-        }
-        catch (DeviceReadException ex)
-        {
-            // NOREAD：工件不良,不是設備故障 / A NOREAD is a bad part, not a broken machine.
-            Log($"讀碼失敗 / Barcode NOREAD: {ex.Message}");
-        }
+        var characterResults = await WithTimeoutAsync(
+            "字符檢測 / character verify", _options.CharacterVerifyTimeout,
+            _verifier.TriggerAsync, cancellationToken).ConfigureAwait(false);
 
-        if (barcode is null)
-        {
-            // 讀不到碼的工件無法追溯,直接判退並省下拍照時間
-            // An untraceable part is rejected outright; skip the capture to save cycle time.
-            judge = Verdict.Fail;
-        }
-        else if (barcode.Length != recipe.BarcodeLength)
-        {
-            // 長度不符通常代表機種掛錯,同樣不拍照
-            // A length mismatch usually means the wrong model is loaded; also skip the capture.
-            judge = Verdict.Fail;
-            Log(string.Create(CultureInfo.InvariantCulture,
-                $"條碼長度不符 / Barcode length mismatch: got {barcode.Length}, recipe expects {recipe.BarcodeLength}"));
-        }
-        else
-        {
-            await WithTimeoutAsync(
-                "移動至拍照位 / move to inspect position", _options.MoveTimeout,
-                token => _motor.MoveToAsync(_options.InspectPositionPulse, _options.MoveSpeedPulsePerSecond, token),
-                cancellationToken).ConfigureAwait(false);
+        // DeviceFaultException 刻意不在此攔截：那是設備層級異常,必須一路上拋到
+        // RunLoopAsync 讓機台停線。工件不良則完全由 LabelJudge 以結果內容表達。
+        // DeviceFaultException is deliberately not caught here: it is an equipment-level
+        // fault and must propagate to RunLoopAsync and stop the line. A bad label is
+        // expressed purely through the result contents, which LabelJudge reads.
+        var rejectReason = LabelJudge.Evaluate(recipe, codeResults, characterResults);
+        var judge = rejectReason is null ? Verdict.Pass : Verdict.Fail;
 
-            visionResult = await WithTimeoutAsync(
-                "拍照判別 / vision trigger", _options.VisionTimeout,
-                _vision.TriggerAsync, cancellationToken).ConfigureAwait(false);
-
-            judge = visionResult == VisionResult.Ok ? Verdict.Pass : Verdict.Fail;
+        if (rejectReason is not null)
+        {
+            Log($"判退 / Rejected: {rejectReason}");
         }
 
         var record = new InspectionRecord(
             Timestamp: DateTime.UtcNow,
             ModelName: recipe.ModelName,
-            BarcodeData: barcode,
-            Iv4Result: visionResult,
-            FinalJudge: judge);
+            FinalJudge: judge,
+            CodeResults: codeResults,
+            CharacterResults: characterResults,
+            RejectReason: rejectReason);
 
         // 寫入失敗即失去追溯性,必須停線 —— 由呼叫端的故障處理接手
         // A failed insert means traceability is lost, which must stop the line; the

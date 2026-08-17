@@ -35,13 +35,13 @@ internal static class Program
         // 模擬裝置：固定種子讓試機時的良率序列可重現
         // Mock devices: fixed seeds make the dry-run verdict sequence reproducible.
         var motor = new MockMotorController();
-        var scanner = new MockBarcodeScanner(seed: 20260730) { NoReadRate = 0.03 };
-        var vision = new MockVisionSensor(seed: 20260730) { NgRate = 0.08 };
+        var codeReader = new MockCodeReader(seed: 20260730) { NoReadRate = 0.03 };
+        var verifier = new MockCharacterVerifier(seed: 20260730) { FailRate = 0.08 };
 
         var database = new DatabaseManager(Path.Combine(dataDirectory, DatabaseFileName));
         var recipes = new RecipeManager(Path.Combine(baseDirectory, RecipeFileName));
 
-        var sequencer = new InspectionSequencer(motor, scanner, vision, database, recipes);
+        var sequencer = new InspectionSequencer(motor, codeReader, verifier, database, recipes);
 
         // 裝置與資料庫由此處擁有,故在此處處置；Sequencer 只處置自己的權杖來源。
         // The devices and database are owned here, so they are disposed here; the
@@ -53,7 +53,7 @@ internal static class Program
         }
         finally
         {
-            DisposeAllAsync(sequencer, motor, scanner, vision, database).GetAwaiter().GetResult();
+            DisposeAllAsync(sequencer, motor, codeReader, verifier, database).GetAwaiter().GetResult();
         }
     }
 

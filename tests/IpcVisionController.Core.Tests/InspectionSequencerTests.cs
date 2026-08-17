@@ -11,14 +11,21 @@ namespace IpcVisionController.Core.Tests;
 /// 檢測週期協調器的行為規格 / Behavioural spec for the inspection sequencer.
 ///
 /// 這裡守的是三條安全需求 / Three safety requirements are guarded here:
-/// 1. 工件不良 ≠ 設備故障。NOREAD 判退後繼續生產,設備沒回應則停線。
-///    A bad part is not a broken machine: reject and carry on for the former, stop for the latter.
+/// 1. 工件不良 ≠ 設備故障。讀不到碼判退後繼續生產,設備回報異常或沒回應則停線。
+///    A bad part is not a broken machine: reject and carry on for the former, stop the
+///    line when a device reports a fault or stops answering.
 /// 2. 操作員停機與設備逾時都是 OperationCanceledException,絕不可混為一談,
 ///    否則設備故障會被當成正常停機靜默吞掉。
 ///    An operator stop and a device timeout are both an OperationCanceledException; conflating
 ///    them silently swallows equipment faults as normal stops.
 /// 3. 寫不進追溯資料庫就等於失去追溯性,必須停線。
 ///    Losing the traceability write means losing traceability, which must stop the line.
+///
+/// 判定規則本身不在這裡測,那是 <see cref="LabelJudgeTests"/> 的工作;
+/// 本檔只驗證協調器有把結果原封不動交給規則,並照規則的結論行動。
+/// The judging rules themselves are not tested here — that is <see cref="LabelJudgeTests"/>.
+/// This file only checks that the sequencer hands the results to the rules untouched and
+/// then acts on the answer.
 ///
 /// 時序 / Timing: 測試刻意壓縮行程與延遲（見 <see cref="FastOptions"/>）,
 /// 讓整份測試在數秒內跑完,同時仍然走真正的非同步路徑。
@@ -69,24 +76,25 @@ public sealed class InspectionSequencerTests : IDisposable
 
         await rig.Sequencer.InitializeAsync();
 
-        // 沒有建表就開始生產,第一個工件的紀錄就會掉
-        // Cycling before the table exists loses the very first part's record.
+        // 沒有建表就開始生產,第一張標籤的紀錄就會掉
+        // Cycling before the table exists loses the very first label's record.
         Assert.Equal(1, rig.Store.InitializeCount);
         Assert.True(File.Exists(rig.Recipes.FilePath));
         Assert.Contains(rig.Logs(), line => line.Contains("Recipe loaded", StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task InitializeAsync_LeavesTheAxisHomedAndTheServoEnabled()
+    public async Task InitializeAsync_LeavesTheWebAlignedAndTheServoEnabled()
     {
         await using var rig = NewRig();
 
         await rig.Sequencer.InitializeAsync();
 
         Assert.True(rig.Motor.IsEnabled);
+        // 對標後累計進給量重新起算 / The feed count restarts after a registration align.
         Assert.Equal(0, rig.Motor.CurrentPosition);
-        Assert.True(rig.Scanner.IsConnected);
-        Assert.True(rig.Vision.IsConnected);
+        Assert.True(rig.Reader.IsConnected);
+        Assert.True(rig.Verifier.IsConnected);
     }
 
     [Fact]
@@ -95,8 +103,8 @@ public sealed class InspectionSequencerTests : IDisposable
         await using var rig = NewRig();
         await rig.Sequencer.InitializeAsync();
 
-        // 重複初始化會在生產中重新復歸,軸會意外跑掉
-        // Re-initialising mid-shift would re-home the axis and move it unexpectedly.
+        // 重複初始化會在生產中重新對標,料帶會意外多走一段
+        // Re-initialising mid-shift would re-align the web and advance it unexpectedly.
         await Assert.ThrowsAsync<InvalidOperationException>(() => rig.Sequencer.InitializeAsync());
     }
 
@@ -105,7 +113,8 @@ public sealed class InspectionSequencerTests : IDisposable
     {
         await using var rig = NewRig();
 
-        // 未復歸就下命令,絕對位置沒有意義 / Absolute moves are meaningless before homing.
+        // 未對標就進給,標籤與感測器的相位沒有意義
+        // Feeding before the registration align leaves the labels out of phase with the sensors.
         Assert.Throws<InvalidOperationException>(rig.Sequencer.Start);
     }
 
@@ -135,11 +144,11 @@ public sealed class InspectionSequencerTests : IDisposable
     }
 
     [Fact]
-    public async Task InitializeAsync_WhenHomingNeverCompletes_FaultsOnTheMoveTimeout()
+    public async Task InitializeAsync_WhenTheAlignNeverCompletes_FaultsOnTheFeedTimeout()
     {
-        await using var rig = NewRig(FastOptions(moveTimeout: TimeSpan.FromMilliseconds(120)));
+        await using var rig = NewRig(FastOptions(feedTimeout: TimeSpan.FromMilliseconds(120)));
 
-        await FaultViaStalledHomingAsync(rig);
+        await FaultViaStalledAlignAsync(rig);
 
         Assert.Equal(MachineState.Faulted, rig.Sequencer.State);
         Assert.NotNull(rig.Sequencer.FaultReason);
@@ -149,13 +158,13 @@ public sealed class InspectionSequencerTests : IDisposable
     [Fact]
     public async Task Reset_AfterAFault_ReturnsToOfflineAndClearsTheReason()
     {
-        await using var rig = NewRig(FastOptions(moveTimeout: TimeSpan.FromMilliseconds(120)));
-        await FaultViaStalledHomingAsync(rig);
+        await using var rig = NewRig(FastOptions(feedTimeout: TimeSpan.FromMilliseconds(120)));
+        await FaultViaStalledAlignAsync(rig);
 
         rig.Sequencer.Reset();
 
-        // 回 Offline 而非 Idle：故障後軸位置不可信,必須重新復歸
-        // Offline, not Idle: after a fault the axis position cannot be trusted.
+        // 回 Offline 而非 Idle：故障後料帶對位不可信,必須重新對標
+        // Offline, not Idle: after a fault the web's registration cannot be trusted.
         Assert.Equal(MachineState.Offline, rig.Sequencer.State);
         Assert.Null(rig.Sequencer.FaultReason);
     }
@@ -163,11 +172,11 @@ public sealed class InspectionSequencerTests : IDisposable
     [Fact]
     public async Task Reset_AfterAFault_AllowsAFullReinitialise()
     {
-        await using var rig = NewRig(FastOptions(moveTimeout: TimeSpan.FromSeconds(5)));
-        await FaultViaStalledHomingAsync(rig, homeTimeout: TimeSpan.FromMilliseconds(120));
+        await using var rig = NewRig(FastOptions(feedTimeout: TimeSpan.FromSeconds(5)));
+        await FaultViaStalledAlignAsync(rig, alignTimeout: TimeSpan.FromMilliseconds(120));
         rig.Sequencer.Reset();
 
-        // 現場排除卡料後,軸恢復動作 / The jam is cleared on the line and the axis moves again.
+        // 現場排除卡料後,料帶恢復進給 / The jam is cleared on the line and the web feeds again.
         rig.Motor.SimulateStall = false;
 
         await rig.Sequencer.InitializeAsync();
@@ -176,89 +185,137 @@ public sealed class InspectionSequencerTests : IDisposable
         Assert.Equal(0, rig.Motor.CurrentPosition);
     }
 
-    // ── 單一週期的判定 / Single-cycle verdicts ───────────────────────────────
-
     [Fact]
-    public async Task RunCycleAsync_WithAGoodPart_RecordsPass()
+    public async Task RunCycleAsync_WhenTheReaderReportsItsOwnFault_StopsTheLine()
     {
         await using var rig = NewRig();
         await rig.Sequencer.InitializeAsync();
-        rig.Scanner.ForcedCode = "ABC123456789";
-        rig.Vision.ForcedResult = VisionResult.Ok;
+        rig.Reader.SimulateFault = true;
+
+        // 感測器自身異常是設備問題,必須上拋停線,不能當成一張不良標籤
+        // A sensor-level fault is an equipment problem: it must propagate and stop the
+        // line, not be recorded as one bad label.
+        await Assert.ThrowsAsync<DeviceFaultException>(
+            () => rig.Sequencer.RunCycleAsync(CancellationToken.None));
+
+        Assert.Empty(rig.Store.Snapshot());
+    }
+
+    [Fact]
+    public async Task RunLoop_WhenAVerifierFaults_StopsTheLine()
+    {
+        await using var rig = NewRig();
+        await rig.Sequencer.InitializeAsync();
+        rig.Verifier.SimulateFault = true;
+
+        rig.Sequencer.Start();
+        await WaitUntilAsync(
+            () => rig.Sequencer.State == MachineState.Faulted,
+            "感測器異常導致停線 / the sensor fault to stop the line");
+
+        Assert.NotNull(rig.Sequencer.FaultReason);
+        Assert.Contains(nameof(DeviceFaultException), rig.Sequencer.FaultReason!, StringComparison.Ordinal);
+    }
+
+    // ── 單一週期的判定 / Single-cycle verdicts ───────────────────────────────
+
+    [Fact]
+    public async Task RunCycleAsync_WithAGoodLabel_RecordsPass()
+    {
+        await using var rig = NewRig();
+        await rig.Sequencer.InitializeAsync();
+        rig.Reader.ForcedCodes = ["ABC123456789"];
+        rig.Verifier.ForcedTexts = ["LOT26A"];
 
         var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
 
         Assert.Equal(Verdict.Pass, record.FinalJudge);
-        Assert.Equal("ABC123456789", record.BarcodeData);
-        Assert.Equal(VisionResult.Ok, record.Iv4Result);
+        Assert.Null(record.RejectReason);
+        Assert.Equal(["ABC123456789"], record.CodeResults.Select(r => r.Data));
+        Assert.Equal(["LOT26A"], record.CharacterResults.Select(r => r.Text));
         Assert.Equal("DEFAULT", record.ModelName);
         Assert.Equal(DateTimeKind.Utc, record.Timestamp.Kind);
         Assert.Single(rig.Store.Snapshot());
     }
 
     [Fact]
-    public async Task RunCycleAsync_WithAnNgVerdict_RecordsFailButKeepsTheBarcode()
+    public async Task RunCycleAsync_AdvancesTheWebByExactlyOnePitch()
     {
         await using var rig = NewRig();
         await rig.Sequencer.InitializeAsync();
-        rig.Scanner.ForcedCode = "ABC123456789";
-        rig.Vision.ForcedResult = VisionResult.Ng;
-
-        var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
-
-        // NG 品也要留下條碼,否則不良品無法追溯 / A reject still needs its barcode, or it cannot be traced.
-        Assert.Equal(Verdict.Fail, record.FinalJudge);
-        Assert.Equal("ABC123456789", record.BarcodeData);
-        Assert.Equal(VisionResult.Ng, record.Iv4Result);
-    }
-
-    [Fact]
-    public async Task RunCycleAsync_WithANoRead_RejectsThePartAndSkipsTheCapture()
-    {
-        await using var rig = NewRig();
-        await rig.Sequencer.InitializeAsync();
-        rig.Scanner.ForceNoRead = true;
-
-        var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
-
-        Assert.Equal(Verdict.Fail, record.FinalJudge);
-        Assert.Null(record.BarcodeData);
-        // 沒拍照 —— 讀不到碼的工件無法追溯,省下拍照時間
-        // No capture: an untraceable part is rejected outright, saving the cycle time.
-        Assert.Null(record.Iv4Result);
-        Assert.Equal(rig.Options.ScanPositionPulse, rig.Motor.CurrentPosition);
-    }
-
-    [Fact]
-    public async Task RunCycleAsync_WithANoRead_DoesNotFaultTheMachine()
-    {
-        await using var rig = NewRig();
-        await rig.Sequencer.InitializeAsync();
-        rig.Scanner.ForceNoRead = true;
 
         await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+        await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+
+        // 每個週期剛好一格。多走一格會整批跳過標籤,少走一格會重複檢測同一張。
+        // Exactly one pitch per cycle: feeding more skips labels wholesale, feeding less
+        // inspects the same label twice.
+        Assert.Equal(rig.Options.FeedPitchPulses * 2, rig.Motor.CurrentPosition);
+    }
+
+    [Fact]
+    public async Task RunCycleAsync_WithAFailingLabel_KeepsTheEvidenceAndTheReason()
+    {
+        await using var rig = NewRig();
+        await rig.Sequencer.InitializeAsync();
+        rig.Reader.ForcedCodes = ["ABC123456789"];
+        rig.Verifier.ForcedTexts = [null];
+
+        var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+
+        // 不良品也要留下讀到的內容,否則無法追溯 / A reject still needs its payload, or it cannot be traced.
+        Assert.Equal(Verdict.Fail, record.FinalJudge);
+        Assert.Equal(["ABC123456789"], record.CodeResults.Select(r => r.Data));
+        Assert.NotNull(record.RejectReason);
+        Assert.Contains("recognised nothing", record.RejectReason!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunCycleAsync_WithANoRead_RejectsWithoutFaultingTheMachine()
+    {
+        await using var rig = NewRig();
+        await rig.Sequencer.InitializeAsync();
+        rig.Reader.ForceNoRead = true;
+
+        var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
 
         // 這是整份測試的核心：工件不良不等於設備故障
         // The heart of this file: a bad part is not a broken machine.
+        Assert.Equal(Verdict.Fail, record.FinalJudge);
+        Assert.Empty(record.CodeResults);
         Assert.Equal(MachineState.Idle, rig.Sequencer.State);
         Assert.Null(rig.Sequencer.FaultReason);
     }
 
     [Fact]
-    public async Task RunCycleAsync_WithAWrongLengthBarcode_RejectsAndSkipsTheCapture()
+    public async Task RunCycleAsync_AfterANoRead_StillTriggersTheVerifier()
     {
         await using var rig = NewRig();
         await rig.Sequencer.InitializeAsync();
-        rig.Scanner.ForcedCode = "SHORT";  // 配方期望 12 碼 / the recipe expects 12
+        rig.Reader.ForceNoRead = true;
 
         var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
 
-        Assert.Equal(Verdict.Fail, record.FinalJudge);
-        Assert.Equal("SHORT", record.BarcodeData);
-        Assert.Null(record.Iv4Result);
+        // 舊架構在讀碼失敗時略過拍照以省下一趟行程;現在兩者共用同一次進給,
+        // 沒有行程可省,而少一組結果就少一半的判退依據。
+        // The old design skipped the capture after a failed read to save a move. With one
+        // feed serving both sensors there is no travel to save, and dropping a result set
+        // halves the evidence behind the reject.
+        Assert.NotEmpty(record.CharacterResults);
+    }
+
+    [Fact]
+    public async Task RunCycleAsync_AnnouncesWhyItRejected()
+    {
+        await using var rig = NewRig();
+        await rig.Sequencer.InitializeAsync();
+        rig.Reader.ForcedCodes = ["SHORT"];
+
+        await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+
         Assert.Contains(
             rig.Logs(),
-            line => line.Contains("Barcode length mismatch", StringComparison.Ordinal));
+            line => line.Contains("length 5 != expected 12", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -276,15 +333,19 @@ public sealed class InspectionSequencerTests : IDisposable
     }
 
     [Fact]
-    public async Task RunCycleAsync_PicksUpAChangeoverOnTheVeryNextPart()
+    public async Task RunCycleAsync_PicksUpAChangeoverOnTheVeryNextLabel()
     {
         await using var rig = NewRig();
         await rig.Sequencer.InitializeAsync();
 
-        // 換線：8 碼機種 / Changeover to an 8-character model.
-        await rig.Recipes.SaveAsync(new RecipeModel { ModelName = "MODEL-B", BarcodeLength = 8 });
-        rig.Scanner.ForcedCode = "SHORTY12";
-        rig.Vision.ForcedResult = VisionResult.Ok;
+        // 換線：8 碼、兩張標籤的機種 / Changeover to an 8-character, two-label model.
+        await rig.Recipes.SaveAsync(new RecipeModel
+        {
+            ModelName = "MODEL-B",
+            ExpectedCodeCount = 2,
+            BarcodeLength = 8,
+        });
+        rig.Reader.ForcedCodes = ["SHORTY12", "SHORTY34"];
 
         var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
 
@@ -295,12 +356,11 @@ public sealed class InspectionSequencerTests : IDisposable
     // ── 逾時與停機的分辨 / Telling a timeout apart from a stop ────────────────
 
     [Fact]
-    public async Task RunCycleAsync_WhenTheVisionSensorStalls_RaisesADeviceTimeout()
+    public async Task RunCycleAsync_WhenTheVerifierStalls_RaisesADeviceTimeout()
     {
-        await using var rig = NewRig(FastOptions(visionTimeout: TimeSpan.FromMilliseconds(120)));
+        await using var rig = NewRig(FastOptions(characterVerifyTimeout: TimeSpan.FromMilliseconds(120)));
         await rig.Sequencer.InitializeAsync();
-        rig.Scanner.ForcedCode = "ABC123456789";
-        rig.Vision.ForcedLatency = Forever;
+        rig.Verifier.ForcedLatency = Forever;
 
         // 必須是 DeviceTimeoutException 而非裸的 OperationCanceledException：
         // 後者會在上層被誤判為「操作員停機」而靜默吞掉。
@@ -309,19 +369,19 @@ public sealed class InspectionSequencerTests : IDisposable
         var ex = await Assert.ThrowsAsync<DeviceTimeoutException>(
             () => rig.Sequencer.RunCycleAsync(CancellationToken.None));
 
-        Assert.Contains("拍照判別", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("字符檢測", ex.Message, StringComparison.Ordinal);
         Assert.Empty(rig.Store.Snapshot());
     }
 
     [Fact]
-    public async Task RunCycleAsync_WhenTheScannerStalls_RaisesADeviceTimeoutNotANoRead()
+    public async Task RunCycleAsync_WhenTheReaderStalls_RaisesADeviceTimeoutNotANoRead()
     {
-        await using var rig = NewRig(FastOptions(barcodeTimeout: TimeSpan.FromMilliseconds(120)));
+        await using var rig = NewRig(FastOptions(codeReadTimeout: TimeSpan.FromMilliseconds(120)));
         await rig.Sequencer.InitializeAsync();
-        rig.Scanner.ForcedLatency = Forever;
+        rig.Reader.ForcedLatency = Forever;
 
         // 沒回應的讀碼器是設備故障,不是 NOREAD —— 判成 NOREAD 會讓整批好品被誤退
-        // An unresponsive scanner is an equipment fault, not a NOREAD; treating it as one
+        // An unresponsive reader is an equipment fault, not a NOREAD; treating it as one
         // would silently reject a whole batch of good parts.
         await Assert.ThrowsAsync<DeviceTimeoutException>(
             () => rig.Sequencer.RunCycleAsync(CancellationToken.None));
@@ -332,13 +392,13 @@ public sealed class InspectionSequencerTests : IDisposable
     {
         await using var rig = NewRig();
         await rig.Sequencer.InitializeAsync();
-        rig.Scanner.ForcedLatency = Forever;
+        rig.Reader.ForcedLatency = Forever;
 
         using var cts = new CancellationTokenSource();
         var cycle = rig.Sequencer.RunCycleAsync(cts.Token);
         await WaitUntilAsync(
-            () => rig.Motor.CurrentPosition == rig.Options.ScanPositionPulse,
-            "軸抵達讀碼位 / axis to reach the scan position");
+            () => rig.Motor.CurrentPosition >= rig.Options.FeedPitchPulses,
+            "料帶進給完成 / the web to finish its pitch");
         await cts.CancelAsync();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => cycle);
@@ -363,9 +423,9 @@ public sealed class InspectionSequencerTests : IDisposable
     }
 
     [Fact]
-    public async Task RunLoop_WhenADeviceStalls_StopsTheLineInsteadOfCarryingOn()
+    public async Task RunLoop_WhenTheWebJams_StopsTheLineInsteadOfCarryingOn()
     {
-        await using var rig = NewRig(FastOptions(moveTimeout: TimeSpan.FromMilliseconds(150)));
+        await using var rig = NewRig(FastOptions(feedTimeout: TimeSpan.FromMilliseconds(150)));
         await rig.Sequencer.InitializeAsync();
         rig.Motor.SimulateStall = true;
 
@@ -399,17 +459,18 @@ public sealed class InspectionSequencerTests : IDisposable
     }
 
     [Fact]
-    public async Task RunLoop_WhenAPartIsRejected_KeepsRunning()
+    public async Task RunLoop_WhenALabelIsRejected_KeepsRunning()
     {
         await using var rig = NewRig();
         await rig.Sequencer.InitializeAsync();
-        rig.Scanner.ForceNoRead = true;
+        rig.Reader.ForceNoRead = true;
 
         rig.Sequencer.Start();
         await WaitUntilAsync(() => rig.Sequencer.CycleCount >= 3, "連續判退後仍持續生產 / to keep cycling through rejects");
         await rig.Sequencer.StopAsync();
 
         Assert.All(rig.Store.Snapshot(), record => Assert.Equal(Verdict.Fail, record.FinalJudge));
+        Assert.All(rig.Store.Snapshot(), record => Assert.NotNull(record.RejectReason));
         Assert.Equal(MachineState.Idle, rig.Sequencer.State);
     }
 
@@ -437,12 +498,12 @@ public sealed class InspectionSequencerTests : IDisposable
     {
         await using var rig = NewRig();
         await rig.Sequencer.InitializeAsync();
-        rig.Scanner.ForcedLatency = Forever;
+        rig.Reader.ForcedLatency = Forever;
 
         rig.Sequencer.Start();
         await WaitUntilAsync(
-            () => rig.Motor.CurrentPosition == rig.Options.ScanPositionPulse,
-            "週期進行到讀碼動作 / the cycle to reach the barcode read");
+            () => rig.Motor.CurrentPosition >= rig.Options.FeedPitchPulses,
+            "週期進行到讀碼動作 / the cycle to reach the code read");
         await rig.Sequencer.StopAsync();
 
         // 停機途中的取消不是故障 / A cancellation caused by the stop is not a fault.
@@ -451,19 +512,19 @@ public sealed class InspectionSequencerTests : IDisposable
     }
 
     [Fact]
-    public async Task StopAsync_MidCycle_LeavesNoRecordForTheUnjudgedPart()
+    public async Task StopAsync_MidCycle_LeavesNoRecordForTheUnjudgedLabel()
     {
         await using var rig = NewRig();
         await rig.Sequencer.InitializeAsync();
-        rig.Scanner.ForcedLatency = Forever;
+        rig.Reader.ForcedLatency = Forever;
 
         rig.Sequencer.Start();
         await WaitUntilAsync(
-            () => rig.Motor.CurrentPosition == rig.Options.ScanPositionPulse,
-            "週期進行到讀碼動作 / the cycle to reach the barcode read");
+            () => rig.Motor.CurrentPosition >= rig.Options.FeedPitchPulses,
+            "週期進行到讀碼動作 / the cycle to reach the code read");
         await rig.Sequencer.StopAsync();
 
-        // 未完成判定的工件不該留下追溯資料 / An unjudged part must leave no traceability data.
+        // 未完成判定的標籤不該留下追溯資料 / An unjudged label must leave no traceability data.
         Assert.Empty(rig.Store.Snapshot());
         Assert.Equal(0, rig.Sequencer.CycleCount);
     }
@@ -535,22 +596,21 @@ public sealed class InspectionSequencerTests : IDisposable
 
     /// <summary>
     /// 壓縮過的站別設定 / Compressed station options.
-    /// 行程短、速度高,讓一個週期約 20 ms;逾時預設寬鬆,由個別測試自行收緊。
-    /// Short strokes at high velocity put a cycle at roughly 20 ms. Timeouts default
+    /// 進給量短、速度高,讓一個週期約 20 ms;逾時預設寬鬆,由個別測試自行收緊。
+    /// A short pitch at high velocity puts a cycle at roughly 20 ms. Timeouts default
     /// generous; the tests that care tighten the one they are exercising.
     /// </summary>
     private static SequencerOptions FastOptions(
-        TimeSpan? moveTimeout = null,
-        TimeSpan? barcodeTimeout = null,
-        TimeSpan? visionTimeout = null,
+        TimeSpan? feedTimeout = null,
+        TimeSpan? codeReadTimeout = null,
+        TimeSpan? characterVerifyTimeout = null,
         TimeSpan? connectTimeout = null) => new()
         {
-            ScanPositionPulse = 100,
-            InspectPositionPulse = 200,
-            MoveSpeedPulsePerSecond = 1_000_000,
-            MoveTimeout = moveTimeout ?? TimeSpan.FromSeconds(5),
-            BarcodeTimeout = barcodeTimeout ?? TimeSpan.FromSeconds(5),
-            VisionTimeout = visionTimeout ?? TimeSpan.FromSeconds(5),
+            FeedPitchPulses = 100,
+            FeedSpeedPulsePerSecond = 1_000_000,
+            FeedTimeout = feedTimeout ?? TimeSpan.FromSeconds(5),
+            CodeReadTimeout = codeReadTimeout ?? TimeSpan.FromSeconds(5),
+            CharacterVerifyTimeout = characterVerifyTimeout ?? TimeSpan.FromSeconds(5),
             ConnectTimeout = connectTimeout ?? TimeSpan.FromSeconds(5),
             CycleInterval = TimeSpan.Zero,
         };
@@ -559,20 +619,24 @@ public sealed class InspectionSequencerTests : IDisposable
     {
         var effective = options ?? FastOptions();
 
-        var motor = new MockMotorController { ConnectLatency = motorConnectLatency ?? Instant };
-        var scanner = new MockBarcodeScanner(seed: 20260731) { MinLatency = Instant, MaxLatency = Instant };
-        var vision = new MockVisionSensor(seed: 20260731)
+        var motor = new MockMotorController
         {
-            MinLatency = Instant,
-            MaxLatency = Instant,
-            // 預設一律 OK,讓判定只由測試明確控制 / Default to OK so verdicts are test-driven, never random.
-            ForcedResult = VisionResult.Ok,
+            ConnectLatency = motorConnectLatency ?? Instant,
+            // 對標行程壓到一個伺服週期 / One servo cycle's worth of align.
+            PulsesToNextMark = 100,
+            AlignSpeedPulsePerSecond = 1_000_000,
         };
+
+        // 兩個感測器都預設「一切正常」,讓判定只由測試明確控制,不受亂數影響
+        // Both sensors default to healthy so verdicts are test-driven, never random.
+        var reader = new MockCodeReader(seed: 20260731) { MinLatency = Instant, MaxLatency = Instant };
+        var verifier = new MockCharacterVerifier(seed: 20260731) { MinLatency = Instant, MaxLatency = Instant };
+
         var store = new FakeStore();
         var recipes = new RecipeManager(_workspace.PathTo("recipe.json"));
-        var sequencer = new InspectionSequencer(motor, scanner, vision, store, recipes, effective);
+        var sequencer = new InspectionSequencer(motor, reader, verifier, store, recipes, effective);
 
-        return new Rig(motor, scanner, vision, store, recipes, sequencer, effective);
+        return new Rig(motor, reader, verifier, store, recipes, sequencer, effective);
     }
 
     /// <summary>
@@ -599,45 +663,38 @@ public sealed class InspectionSequencerTests : IDisposable
     }
 
     /// <summary>
-    /// 以「原點復歸卡住」把機台推入 Faulted / Drive the rig into Faulted through a stalled home.
+    /// 以「對標卡住」把機台推入 Faulted / Drive the rig into Faulted through a stalled align.
     ///
-    /// 必須先把軸推離原點:HomeAsync 的目標是 0,若軸已停在 0,
-    /// MoveToAsync 的等待迴圈一次都不會執行,SimulateStall 就卡不住任何東西,
-    /// 初始化反而會成功 —— 這是本輔助方法最容易寫錯的地方。
-    /// The axis has to be parked off zero first: HomeAsync targets 0, and if the axis is
-    /// already sitting there the move loop never executes, so SimulateStall would stall
-    /// nothing and initialisation would succeed instead. This is the easy mistake here.
+    /// 相對進給讓這件事變簡單了：對標一定要走 PulsesToNextMark 這段距離,
+    /// 所以 SimulateStall 一設就必然卡住。
+    /// 舊的絕對定位版本必須先把軸推離原點,否則 HomeAsync 的目標 0 已經到位,
+    /// 等待迴圈一次都不會執行,SimulateStall 就卡不住任何東西。
+    /// The relative feed simplifies this: an align always has PulsesToNextMark of travel
+    /// to cover, so setting SimulateStall necessarily stalls it. The old absolute-position
+    /// version had to park the axis off zero first, or HomeAsync's target of 0 was already
+    /// satisfied, the wait loop never ran, and SimulateStall stalled nothing.
     ///
-    /// homeTimeout 為 null 時由 <see cref="SequencerOptions.MoveTimeout"/> 把關,
+    /// alignTimeout 為 null 時由 <see cref="SequencerOptions.FeedTimeout"/> 把關,
     /// 走的是設備逾時路徑(DeviceTimeoutException);
     /// 給值時改由呼叫端的權杖取消,讓站別設定得以留寬而故障仍然來得快。
     /// 兩者的差別正是 WithTimeoutAsync 用外層權杖狀態所區分的「設備逾時」與「操作員停機」。
-    /// With homeTimeout null the sequencer's own MoveTimeout is the guard, taking the
+    /// With alignTimeout null the sequencer's own FeedTimeout is the guard, taking the
     /// device-timeout path (DeviceTimeoutException). When supplied, the caller's token
     /// cancels instead, so the options can stay generous while the fault still arrives
     /// promptly. The two are precisely the device-timeout versus operator-stop cases that
     /// WithTimeoutAsync separates by inspecting the outer token.
     /// </summary>
-    private static async Task FaultViaStalledHomingAsync(Rig rig, TimeSpan? homeTimeout = null)
+    private static async Task FaultViaStalledAlignAsync(Rig rig, TimeSpan? alignTimeout = null)
     {
-        // 手動連線致能,才能在初始化前先把軸移離原點 / Connect and enable by hand so the
-        // axis can be moved off zero before initialisation runs.
-        await rig.Motor.ConnectAsync(CancellationToken.None);
-        await rig.Motor.EnableAsync(CancellationToken.None);
-        await rig.Motor.MoveToAsync(
-            rig.Options.ScanPositionPulse,
-            rig.Options.MoveSpeedPulsePerSecond,
-            CancellationToken.None);
-
         rig.Motor.SimulateStall = true;
 
-        if (homeTimeout is null)
+        if (alignTimeout is null)
         {
             await Assert.ThrowsAsync<DeviceTimeoutException>(() => rig.Sequencer.InitializeAsync());
         }
         else
         {
-            using var cts = new CancellationTokenSource(homeTimeout.Value);
+            using var cts = new CancellationTokenSource(alignTimeout.Value);
             await Assert.ThrowsAnyAsync<OperationCanceledException>(
                 () => rig.Sequencer.InitializeAsync(cts.Token));
         }
@@ -654,16 +711,16 @@ public sealed class InspectionSequencerTests : IDisposable
 
         public Rig(
             MockMotorController motor,
-            MockBarcodeScanner scanner,
-            MockVisionSensor vision,
+            MockCodeReader reader,
+            MockCharacterVerifier verifier,
             FakeStore store,
             RecipeManager recipes,
             InspectionSequencer sequencer,
             SequencerOptions options)
         {
             Motor = motor;
-            Scanner = scanner;
-            Vision = vision;
+            Reader = reader;
+            Verifier = verifier;
             Store = store;
             Recipes = recipes;
             Sequencer = sequencer;
@@ -698,9 +755,9 @@ public sealed class InspectionSequencerTests : IDisposable
 
         public MockMotorController Motor { get; }
 
-        public MockBarcodeScanner Scanner { get; }
+        public MockCodeReader Reader { get; }
 
-        public MockVisionSensor Vision { get; }
+        public MockCharacterVerifier Verifier { get; }
 
         public FakeStore Store { get; }
 
@@ -741,8 +798,8 @@ public sealed class InspectionSequencerTests : IDisposable
         {
             await Sequencer.DisposeAsync();
             await Motor.DisposeAsync();
-            await Scanner.DisposeAsync();
-            await Vision.DisposeAsync();
+            await Reader.DisposeAsync();
+            await Verifier.DisposeAsync();
         }
     }
 

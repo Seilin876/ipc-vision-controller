@@ -29,17 +29,32 @@ public sealed class RecipeManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task SaveAsync_ThenLoadAsync_RoundTripsBothFields()
+    public async Task SaveAsync_ThenLoadAsync_RoundTripsEveryField()
     {
         var manager = NewManager();
-        await manager.SaveAsync(new RecipeModel { ModelName = "MODEL-B", BarcodeLength = 20 });
+        await manager.SaveAsync(new RecipeModel
+        {
+            ModelName = "MODEL-B",
+            ExpectedCodeCount = 3,
+            BarcodeLength = 20,
+            MinimumCodeGrade = 65,
+            ExpectedCharacterRegionCount = 4,
+        });
 
         // 另開一個實例,確保讀的是磁碟而不是記憶體快取
         // A second instance proves the value came off disk, not from an in-memory cache.
         var reloaded = await NewManager().LoadAsync();
 
+        // 逐欄檢查而非只看兩欄:漏掉的欄位會靜靜地退回預設值,
+        // 換線時看起來配方已載入,判定用的卻是上一個機種的門檻。
+        // Every field, not just two: a field missed by the serialiser or by Clone() silently
+        // falls back to its default, so after a changeover the recipe looks loaded while the
+        // judging still uses the previous model's thresholds.
         Assert.Equal("MODEL-B", reloaded.ModelName);
+        Assert.Equal(3, reloaded.ExpectedCodeCount);
         Assert.Equal(20, reloaded.BarcodeLength);
+        Assert.Equal(65, reloaded.MinimumCodeGrade);
+        Assert.Equal(4, reloaded.ExpectedCharacterRegionCount);
     }
 
     [Fact]
@@ -66,15 +81,76 @@ public sealed class RecipeManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task LoadAsync_WithNonPositiveBarcodeLength_ThrowsInvalidRecipe()
+    public async Task LoadAsync_WithZeroBarcodeLength_DisablesTheLengthCheck()
     {
         var manager = NewManager();
         await File.WriteAllTextAsync(manager.FilePath, """
             { "ModelName": "MODEL-D", "BarcodeLength": 0 }
             """);
 
-        // 長度 0 會讓所有工件都判退,寧可在載入時就爆
-        // A length of 0 would reject every part; fail at load time instead.
+        var recipe = await manager.LoadAsync();
+
+        // 0 是 NoCheck 哨兵,不是不合法值：有些機種的條碼長度本來就不固定,
+        // 對這種機種而言「不檢查長度」是正確設定,載入時不該失敗。
+        // Zero is the NoCheck sentinel, not an invalid value: some models genuinely carry
+        // variable-length codes, and for those "do not check the length" is the correct
+        // setting rather than a load-time failure.
+        Assert.Equal(RecipeModel.NoCheck, recipe.BarcodeLength);
+    }
+
+    [Fact]
+    public async Task LoadAsync_WithNegativeBarcodeLength_ThrowsInvalidRecipe()
+    {
+        var manager = NewManager();
+        await File.WriteAllTextAsync(manager.FilePath, """
+            { "ModelName": "MODEL-D", "BarcodeLength": -1 }
+            """);
+
+        // 負長度無論如何都比不中,會讓整批工件判退,寧可在載入時就爆
+        // A negative length can never match, so it would reject every part; fail at load
+        // time instead.
+        await Assert.ThrowsAsync<InvalidRecipeException>(() => manager.LoadAsync());
+    }
+
+    [Fact]
+    public async Task LoadAsync_WithZeroExpectedCodeCount_ThrowsInvalidRecipe()
+    {
+        var manager = NewManager();
+        await File.WriteAllTextAsync(manager.FilePath, """
+            { "ModelName": "MODEL-H", "ExpectedCodeCount": 0 }
+            """);
+
+        // 期望 0 筆條碼等於讀碼站什麼都不檢查,一律 PASS —— 是打錯,不是意圖
+        // Expecting zero codes makes the reading station check nothing and pass everything;
+        // that is a typo, not an intent.
+        await Assert.ThrowsAsync<InvalidRecipeException>(() => manager.LoadAsync());
+    }
+
+    [Fact]
+    public async Task LoadAsync_WithZeroExpectedCharacterRegionCount_ThrowsInvalidRecipe()
+    {
+        var manager = NewManager();
+        await File.WriteAllTextAsync(manager.FilePath, """
+            { "ModelName": "MODEL-I", "ExpectedCharacterRegionCount": 0 }
+            """);
+
+        // 同理:期望 0 個區域等於字符檢測整站失效
+        // Likewise: expecting zero regions disables the character-verification station entirely.
+        await Assert.ThrowsAsync<InvalidRecipeException>(() => manager.LoadAsync());
+    }
+
+    [Fact]
+    public async Task LoadAsync_WithNegativeMinimumCodeGrade_ThrowsInvalidRecipe()
+    {
+        var manager = NewManager();
+        await File.WriteAllTextAsync(manager.FilePath, """
+            { "ModelName": "MODEL-J", "MinimumCodeGrade": -1 }
+            """);
+
+        // 等級下限為負代表任何等級都過關,卻讓人誤以為品質管制已啟用 ——
+        // 不檢查要寫 null,不是負數。
+        // A negative minimum passes every grade while reading as though grade checking were
+        // enabled. Disabling the check is spelled null, not a negative number.
         await Assert.ThrowsAsync<InvalidRecipeException>(() => manager.LoadAsync());
     }
 

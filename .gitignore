@@ -22,3 +22,15 @@ publish/
 *.db-wal
 *.db-shm
 recipe.json
+
+# 作業系統與編輯器產生的雜物 / OS and editor litter
+#
+# 開發機是 macOS、產線機是 Windows，兩邊都會在資料夾裡自動落下中繼檔。
+# 不寫斜線也不加路徑，讓規則在任何層級都生效 —— 這類檔案到處都會冒出來。
+# Development happens on macOS and the line runs Windows; both drop metadata files
+# into folders on their own. No slash and no path, so the rules match at every level:
+# this litter appears anywhere.
+# Windows 的 Thumbs.db 已被上面的 *.db 涵蓋，不重複列。
+# Windows' Thumbs.db is already covered by the *.db rule above; not repeated here.
+.DS_Store
+desktop.ini

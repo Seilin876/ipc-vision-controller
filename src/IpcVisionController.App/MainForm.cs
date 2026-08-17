@@ -57,15 +57,39 @@ internal sealed class MainForm : Form
 
     private readonly Label _positionLabel = new()
     {
-        Text = "軸位置 Position: 0",
+        Text = "已進給 Fed: 0",
         Font = new Font("Consolas", 11F),
         TextAlign = ContentAlignment.MiddleCenter,
         Dock = DockStyle.Fill,
     };
 
-    private readonly TextBox _modelNameBox = new() { Width = 160 };
-    private readonly NumericUpDown _barcodeLengthBox = new() { Minimum = 1, Maximum = 128, Value = 12, Width = 80 };
-    private readonly Button _saveRecipeButton = new() { Text = "儲存配方 Save", Width = 140, Height = 30 };
+    private readonly TextBox _modelNameBox = new() { Width = 140 };
+    private readonly NumericUpDown _codeCountBox = new() { Minimum = 1, Maximum = 10, Value = 1, Width = 60 };
+
+    /// <summary>下限 0 代表不檢查長度 / A minimum of 0 means the length is not checked.</summary>
+    private readonly NumericUpDown _barcodeLengthBox = new() { Minimum = 0, Maximum = 128, Value = 12, Width = 70 };
+
+    /// <summary>
+    /// 等級下限是可選的,因此用核取方塊而非哨兵值 / The grade minimum is optional, so a
+    /// checkbox carries the "unset" case rather than another sentinel number.
+    /// 長度已經用 0 當哨兵了,再疊一個哨兵刻度只會讓現場記不住哪個數字代表關閉。
+    /// The length field already spends 0 as a sentinel; a second sentinel scale would
+    /// leave the line guessing which number switches which check off.
+    /// </summary>
+    private readonly CheckBox _checkGradeBox = new()
+    {
+        Text = "檢查等級 Check grade",
+        AutoSize = true,
+        Padding = new Padding(12, 6, 0, 0),
+    };
+
+    private readonly NumericUpDown _minimumGradeBox = new()
+    {
+        Minimum = 0, Maximum = 100, Value = 70, Width = 60, Enabled = false,
+    };
+
+    private readonly NumericUpDown _regionCountBox = new() { Minimum = 1, Maximum = 10, Value = 1, Width = 60 };
+    private readonly Button _saveRecipeButton = new() { Text = "儲存配方 Save", Width = 130, Height = 30 };
 
     private readonly ListView _recordList = new()
     {
@@ -102,6 +126,7 @@ internal sealed class MainForm : Form
         _database = database ?? throw new ArgumentNullException(nameof(database));
 
         Text = "IPC Vision Controller";
+        Icon = LoadWindowIcon();
         MinimumSize = new Size(900, 640);
         StartPosition = FormStartPosition.CenterScreen;
 
@@ -109,13 +134,42 @@ internal sealed class MainForm : Form
         WireEvents();
     }
 
+    /// <summary>
+    /// 載入視窗圖示 / Load the window icon.
+    ///
+    /// 從內嵌資源而非檔案讀取：圖示檔若沒被複製到輸出目錄就會變成執行期才發現的缺檔,
+    /// 內嵌資源則跟著組件走,發佈方式（framework-dependent、single-file）再怎麼換都在。
+    /// Read from an embedded resource rather than a file: a loose icon that misses the
+    /// output directory becomes a run-time surprise, whereas an embedded one travels
+    /// with the assembly whatever the publish shape.
+    ///
+    /// 讀不到就回 null（沿用系統預設圖示）而不拋例外 ——
+    /// 圖示是外觀,產線工具不該為了外觀開不起來。
+    /// A failure yields null (keeping the stock icon) rather than an exception: the icon
+    /// is cosmetic, and a line tool must not refuse to open over cosmetics.
+    /// </summary>
+    private static Icon? LoadWindowIcon()
+    {
+        // 名稱對應 csproj 的 LogicalName / Matches the LogicalName in the csproj.
+        using var stream = typeof(MainForm).Assembly
+            .GetManifestResourceStream("IpcVisionController.App.delta.ico");
+
+        // 傳入多尺寸 .ico,由 WinForms 自行挑標題列與 Alt-Tab 各自需要的尺寸
+        // Handing over the multi-size .ico lets WinForms pick the right one for the
+        // title bar and for Alt-Tab independently.
+        return stream is null ? null : new Icon(stream);
+    }
+
     private void BuildLayout()
     {
-        _recordList.Columns.Add("時間 Time", 150);
-        _recordList.Columns.Add("機種 Model", 110);
-        _recordList.Columns.Add("條碼 Barcode", 200);
-        _recordList.Columns.Add("IV4", 60);
-        _recordList.Columns.Add("判定 Judge", 80);
+        _recordList.Columns.Add("時間 Time", 140);
+        _recordList.Columns.Add("機種 Model", 90);
+        _recordList.Columns.Add("條碼 Codes", 190);
+        _recordList.Columns.Add("字符 Characters", 140);
+        _recordList.Columns.Add("判定 Judge", 70);
+        // 判退原因擺最後且給最寬：不良品的追溯價值有一半在「為什麼退」
+        // Widest and last: half the traceability value of a reject is *why*.
+        _recordList.Columns.Add("判退原因 Reject reason", 420);
 
         var commandPanel = new FlowLayoutPanel
         {
@@ -138,18 +192,27 @@ internal sealed class MainForm : Form
         statusPanel.Controls.Add(_tallyLabel, 1, 0);
         statusPanel.Controls.Add(_positionLabel, 2, 0);
 
+        // 欄位變多後單行擺不下,允許換行而非橫向捲動 —— 現場用觸控操作,捲動比換行難按
+        // Too many fields for one row now; wrap rather than scroll sideways, because the
+        // line drives this by touch and a scrollbar is the harder target.
         var recipePanel = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(8, 4, 8, 4),
-            WrapContents = false,
+            WrapContents = true,
         };
         recipePanel.Controls.AddRange(
         [
             new Label { Text = "機種 Model:", AutoSize = true, Padding = new Padding(0, 8, 0, 0) },
             _modelNameBox,
-            new Label { Text = "條碼長度 Barcode length:", AutoSize = true, Padding = new Padding(12, 8, 0, 0) },
+            new Label { Text = "條碼筆數 Codes:", AutoSize = true, Padding = new Padding(12, 8, 0, 0) },
+            _codeCountBox,
+            new Label { Text = "長度 Length (0=不檢查 off):", AutoSize = true, Padding = new Padding(12, 8, 0, 0) },
             _barcodeLengthBox,
+            _checkGradeBox,
+            _minimumGradeBox,
+            new Label { Text = "字符區域 Regions:", AutoSize = true, Padding = new Padding(12, 8, 0, 0) },
+            _regionCountBox,
             _saveRecipeButton,
         ]);
 
@@ -179,7 +242,8 @@ internal sealed class MainForm : Form
         };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 60F));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 70F));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 60F));
+        // 配方欄位換行後需要兩行的高度 / Two rows' worth of height now that the fields wrap.
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 90F));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
         root.Controls.Add(commandPanel, 0, 0);
         root.Controls.Add(statusPanel, 0, 1);
@@ -196,6 +260,7 @@ internal sealed class MainForm : Form
         _stopButton.Click += OnStopClicked;
         _resetButton.Click += OnResetClicked;
         _saveRecipeButton.Click += OnSaveRecipeClicked;
+        _checkGradeBox.CheckedChanged += (_, _) => _minimumGradeBox.Enabled = _checkGradeBox.Checked;
 
         _sequencer.StateChanged += OnStateChanged;
         _sequencer.CycleCompleted += OnCycleCompleted;
@@ -283,12 +348,15 @@ internal sealed class MainForm : Form
             var recipe = new RecipeModel
             {
                 ModelName = _modelNameBox.Text.Trim(),
+                ExpectedCodeCount = (int)_codeCountBox.Value,
                 BarcodeLength = (int)_barcodeLengthBox.Value,
+                MinimumCodeGrade = _checkGradeBox.Checked ? (int)_minimumGradeBox.Value : null,
+                ExpectedCharacterRegionCount = (int)_regionCountBox.Value,
             };
 
             await _recipes.SaveAsync(recipe).ConfigureAwait(true);
             AppendLog(string.Create(CultureInfo.InvariantCulture,
-                $"配方已儲存 / Recipe saved: {recipe.ModelName} (length {recipe.BarcodeLength})"));
+                $"配方已儲存 / Recipe saved: {recipe.ModelName} ({recipe.ExpectedCodeCount} code(s), length {recipe.BarcodeLength}, grade ≥ {recipe.MinimumCodeGrade?.ToString(CultureInfo.InvariantCulture) ?? "off"}, {recipe.ExpectedCharacterRegionCount} region(s))"));
         }
         catch (InvalidRecipeException ex)
         {
@@ -344,8 +412,11 @@ internal sealed class MainForm : Form
         _tallyLabel.Text = string.Create(CultureInfo.InvariantCulture,
             $"PASS {_passCount} / FAIL {_failCount}");
 
+        // 累計進給量而非絕對座標：料帶沒有絕對位置,只有「自上次對標以來走了多少」
+        // Accumulated feed, not an absolute coordinate: a web has no absolute position,
+        // only how far it has run since the last registration align.
         _positionLabel.Text = string.Create(CultureInfo.InvariantCulture,
-            $"軸位置 Position: {_motor.CurrentPosition:N0}");
+            $"已進給 Fed: {_motor.CurrentPosition:N0}");
     }
 
     // ── 顯示輔助 / Rendering helpers ─────────────────────────────────────────
@@ -386,9 +457,10 @@ internal sealed class MainForm : Form
             // Stored in UTC, shown in local time — the line only reads local time.
             record.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
             record.ModelName,
-            record.BarcodeData ?? "(NOREAD)",
-            record.Iv4Result ?? "-",
+            Describe(record.CodeResults, r => r.Data, "(NOREAD)"),
+            Describe(record.CharacterResults, r => r.Text, "(未辨識 no read)"),
             record.FinalJudge,
+            record.RejectReason ?? string.Empty,
         ]);
 
         item.BackColor = record.FinalJudge == Verdict.Pass ? Color.Honeydew : Color.MistyRose;
@@ -402,6 +474,19 @@ internal sealed class MainForm : Form
             _recordList.Items.Add(item);
         }
     }
+
+    /// <summary>
+    /// 把一次觸發的多筆結果併成一格文字 / Fold one trigger's many results into a single cell.
+    /// 空清單與「有結果但內容是空的」必須看得出差別 —— 前者是感測器什麼都沒回,
+    /// 後者是回了卻解不出來,現場的排查方向完全不同。
+    /// An empty list and "a result arrived but carried nothing" must look different: the
+    /// first means the sensor reported nothing at all, the second that it reported and
+    /// could not decode. They send the operator looking in different places.
+    /// </summary>
+    private static string Describe<T>(IReadOnlyList<T> results, Func<T, string?> select, string emptyValue)
+        => results.Count == 0
+            ? "(無回報 none)"
+            : string.Join(", ", results.Select(r => select(r) ?? emptyValue));
 
     private void TrimRecordRows()
     {
@@ -444,6 +529,17 @@ internal sealed class MainForm : Form
         AppendLog($"{caption}: {ex.Message}");
         MessageBox.Show(this, ex.Message, caption, MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
+
+    /// <summary>
+    /// 夾到控制項容許範圍 / Clamp into the control's own range.
+    /// 手改過的配方檔可能帶著超出範圍的值,直接指派會拋 ArgumentOutOfRangeException
+    /// 並讓主畫面開不起來 —— 顯示夾住的值再讓操作員自行更正比較好。
+    /// A hand-edited recipe may carry an out-of-range value, and assigning it directly
+    /// throws ArgumentOutOfRangeException and stops the main screen from opening.
+    /// Showing the clamped value and letting the operator correct it is the kinder failure.
+    /// </summary>
+    private static decimal Clamp(int value, NumericUpDown box)
+        => Math.Clamp(value, (int)box.Minimum, (int)box.Maximum);
 
     private static string StateCaption(MachineState state) => state switch
     {
@@ -502,8 +598,16 @@ internal sealed class MainForm : Form
         // 載入現有配方讓畫面與磁碟一致 / Load the on-disk recipe so the screen matches it.
         var current = _recipes.Current;
         _modelNameBox.Text = current.ModelName;
-        _barcodeLengthBox.Value = Math.Clamp(
-            current.BarcodeLength, (int)_barcodeLengthBox.Minimum, (int)_barcodeLengthBox.Maximum);
+        _codeCountBox.Value = Clamp(current.ExpectedCodeCount, _codeCountBox);
+        _barcodeLengthBox.Value = Clamp(current.BarcodeLength, _barcodeLengthBox);
+        _regionCountBox.Value = Clamp(current.ExpectedCharacterRegionCount, _regionCountBox);
+
+        _checkGradeBox.Checked = current.MinimumCodeGrade.HasValue;
+        _minimumGradeBox.Enabled = _checkGradeBox.Checked;
+        if (current.MinimumCodeGrade is int grade)
+        {
+            _minimumGradeBox.Value = Clamp(grade, _minimumGradeBox);
+        }
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

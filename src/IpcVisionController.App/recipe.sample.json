@@ -4,5 +4,23 @@
   // The live file is recipe.json in the output directory (not versioned); the first
   // start writes a default automatically. Copy this file over it to try other models.
   "ModelName": "MODEL-A",
-  "BarcodeLength": 12
+
+  // 一次觸發應讀到幾筆條碼。少於此數即判退 —— 這是「漏貼標籤」唯一會被抓到的地方。
+  // Codes expected from one trigger. Fewer is a reject; this is the only check that
+  // catches a missing label.
+  "ExpectedCodeCount": 2,
+
+  // 期望的條碼字元長度，0 表示不檢查。
+  // Expected barcode length; 0 disables the check.
+  "BarcodeLength": 12,
+
+  // 條碼品質等級下限，null 表示不檢查。
+  // 刻度由感測器決定：SR 系列的讀取餘裕度為 0–100，愈高愈好。
+  // Lower bound on code quality; null disables the check. The scale is the sensor's own —
+  // the SR-series matching level runs 0–100, higher is better.
+  "MinimumCodeGrade": 70,
+
+  // 一次觸發應回報幾個字符檢測區域。IV4 最多 10 個。
+  // Character regions expected from one trigger; the IV4 supports up to 10.
+  "ExpectedCharacterRegionCount": 2
 }
