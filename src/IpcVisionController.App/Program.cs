@@ -30,6 +30,19 @@ internal static class Program
     /// <summary>實機裝置設定檔名（非版控）/ Real-device settings file name (not versioned).</summary>
     private const string DeviceFileName = "device.json";
 
+    /// <summary>
+    /// 裝置設定檔的完整路徑 / The device settings file's full path.
+    ///
+    /// 位置是「exe 旁邊」而非原始碼資料夾。csproj 只複製 device.sample.json,
+    /// 所以放在原始碼資料夾的 device.json 永遠不會抵達輸出目錄,程式會安靜地跑模擬。
+    /// 由此處單一提供給畫面顯示,現場才看得到程式究竟找了哪個路徑。
+    /// The location is next to the exe, not the source folder: the csproj copies only
+    /// device.sample.json, so a device.json left in the source folder never reaches the
+    /// output directory and the program quietly runs on mocks. Exposed from here so the UI
+    /// can show the line exactly which path was searched.
+    /// </summary>
+    internal static string DevicePath => Path.Combine(AppContext.BaseDirectory, DeviceFileName);
+
     [STAThread]
     private static void Main()
     {
@@ -48,8 +61,7 @@ internal static class Program
         // A broken settings file stops the program rather than silently falling back to mocks:
         // believing the real sensor is attached while running on mocks is far more dangerous
         // than not starting at all.
-        var deviceOptions = Iv4Options.LoadAsync(Path.Combine(baseDirectory, DeviceFileName))
-            .GetAwaiter().GetResult();
+        var deviceOptions = Iv4Options.LoadAsync(DevicePath).GetAwaiter().GetResult();
 
         Iv4VisionSensor? sensor = null;
         ICodeReader codeReader;

@@ -54,6 +54,16 @@ public sealed class Iv4VisionSensor : ICodeReader, ICharacterVerifier
     public bool IsConnected => _client?.Connected == true;
 
     /// <summary>
+    /// 目前生效的欄位配置摘要 / A summary of the field layout now in force.
+    /// 供畫面在開機時顯示。索引錯誤的表徵是「每張標籤都判退」,把實際生效的索引印出來,
+    /// 才能與原始電文對照 —— 否則只能憑判定結果猜設定,而那猜不出來。
+    /// Shown by the UI at startup. A wrong index presents as "every label rejects", so the
+    /// indexes actually in force have to be printed to be checked against the raw frame;
+    /// otherwise the only evidence is the verdicts, which cannot distinguish the cause.
+    /// </summary>
+    public string Configuration => _options.Describe();
+
+    /// <summary>
     /// 每收到一筆原始電文就引發 / Raised for every raw frame received.
     ///
     /// 這是實機導入時最有用的一件事:電文格式由感測器端的設定決定,只有看到真正的電文

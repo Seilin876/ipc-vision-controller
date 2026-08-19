@@ -156,4 +156,29 @@ public sealed class Iv4OptionsTests : IDisposable
 
         Assert.Equal(expected, options.TerminatorText);
     }
+
+    /// <summary>
+    /// 摘要必須帶著三組索引 / The summary has to carry all three index lists.
+    /// 這行字是操作員唯一能拿來與原始電文對照的東西。少印一組索引,那一組錯掉就查不出來 ——
+    /// 表徵仍是「每張標籤都判退」,而現場會以為設定已經核對過了。
+    /// This line is the only thing an operator can hold against a raw frame. Omit one list and a
+    /// wrong index in it is undiagnosable: it still presents as "every label rejects", except now
+    /// the line believes the configuration has already been checked.
+    /// </summary>
+    [Fact]
+    public void Describe_CarriesTheAddressAndEveryFieldList()
+    {
+        var options = Valid();
+        options.Port = 8501;
+        options.CodeDataFields = [1, 3];
+        options.CodeGradeFields = [2, 4];
+        options.CharacterTextFields = [5, 6];
+
+        var description = options.Describe();
+
+        Assert.Contains("192.168.0.10:8501", description, StringComparison.Ordinal);
+        Assert.Contains("1 3", description, StringComparison.Ordinal);
+        Assert.Contains("2 4", description, StringComparison.Ordinal);
+        Assert.Contains("5 6", description, StringComparison.Ordinal);
+    }
 }

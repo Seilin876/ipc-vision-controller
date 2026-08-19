@@ -136,13 +136,69 @@ internal sealed class MainForm : Form
         _database = database ?? throw new ArgumentNullException(nameof(database));
         _sensor = sensor;
 
-        Text = "IPC Vision Controller";
+        // 標題在此設定而非 OnShown：標題列是模擬/實機唯一永遠可見的標示,
+        // 不該有任何一瞬間顯示未標示的標題。Form.Text 在句柄建立前指派是安全的。
+        // The title is set here rather than in OnShown: the title bar is the only always-visible
+        // mark of mock versus live and must never appear unmarked, not even for one frame.
+        // Assigning Form.Text before the handle exists is safe.
+        Text = DeviceModeTitle();
         Icon = LoadWindowIcon();
         MinimumSize = new Size(900, 640);
         StartPosition = FormStartPosition.CenterScreen;
 
         BuildLayout();
         WireEvents();
+    }
+
+    /// <summary>視窗標題的固定部分 / The fixed part of the window title.</summary>
+    private const string BaseTitle = "IPC Vision Controller";
+
+    /// <summary>
+    /// 帶模擬/實機標示的視窗標題 / The window title, carrying the mock-versus-live mark.
+    ///
+    /// 模擬判定來自固定種子的產生器,與任何一張標籤都無關,但在畫面上與實機結果一模一樣 ——
+    /// 有條碼、有良率、有判退原因。不標示等於默許把模擬資料簽核成出貨紀錄。
+    /// 標示放在標題列,是因為那是唯一永遠在畫面上、連截圖都帶得走的位置。
+    /// Mock verdicts come from a seeded generator and have nothing to do with any label, yet on
+    /// screen they are indistinguishable from real ones — codes, a yield, reject reasons. Not
+    /// marking the mode permits mock data to be signed off as a shipping record. The mark lives
+    /// in the title bar as the one place always on screen that also survives a screenshot.
+    /// </summary>
+    private string DeviceModeTitle() => _sensor is null
+        ? $"{BaseTitle} — 【模擬資料 MOCK DATA】非出貨依據 / not a shipping record"
+        : $"{BaseTitle} — 實機 / LIVE {_sensor.Name}";
+
+    /// <summary>
+    /// 把模擬/實機的來由寫進操作訊息區 / Record why this is mock or live in the log pane.
+    ///
+    /// 光標示模式不夠:現場還需要知道「為什麼是模擬」與「要改哪個檔」,否則只知道不對,
+    /// 不知道下一步。實機時則印出實際生效的欄位索引,那是唯一能與原始電文對照的東西。
+    /// Marking the mode is not enough: the line also needs why it is mocked and which file
+    /// changes it, or it knows only that something is wrong and not what to do next. On live
+    /// hardware it prints the indexes actually in force, the only thing a raw frame can be
+    /// checked against.
+    /// </summary>
+    private void AppendDeviceModeLog()
+    {
+        if (_sensor is null)
+        {
+            AppendLog("模擬模式 / MOCK MODE");
+            AppendLog("判定來自固定種子的亂數產生器,與實際標籤無關,不可作為出貨依據。");
+            AppendLog("Verdicts come from a seeded generator, unrelated to any real label.");
+            AppendLog($"找不到裝置設定檔 / device settings file not found: {Program.DevicePath}");
+            AppendLog("接實機：把 device.sample.json 複製成上述路徑的 device.json（與 exe 同一資料夾,"
+                + "不是原始碼資料夾）,填入現場數值後重新啟動。");
+            AppendLog("To go live: copy device.sample.json to that exact path as device.json — next to "
+                + "the exe, not in the source folder — fill in the line's values, and restart.");
+            return;
+        }
+
+        AppendLog($"實機模式 / LIVE MODE: {_sensor.Name}");
+        AppendLog($"欄位配置 / field layout: {_sensor.Configuration}");
+        AppendLog("欄位索引未經實機電文核對前,判定結果不足以採信 —— 請先按單次觸發,"
+            + "對照隨後出現的「IV4 電文」數欄位。");
+        AppendLog("Until the field indexes are checked against a real frame the verdicts cannot be "
+            + "trusted: press Trigger once and count the fields in the IV4 frame line that follows.");
     }
 
     /// <summary>
@@ -649,6 +705,9 @@ internal sealed class MainForm : Form
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
+
+        // 模式擺在操作訊息區的第一行,任何判定之前 / The mode heads the log, ahead of any verdict.
+        AppendDeviceModeLog();
 
         // 載入現有配方讓畫面與磁碟一致 / Load the on-disk recipe so the screen matches it.
         var current = _recipes.Current;
