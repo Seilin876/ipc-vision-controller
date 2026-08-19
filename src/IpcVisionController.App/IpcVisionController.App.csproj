@@ -27,6 +27,7 @@
 
   <ItemGroup>
     <None Update="recipe.sample.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="device.sample.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

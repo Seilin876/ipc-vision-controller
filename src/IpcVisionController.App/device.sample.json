@@ -1,0 +1,63 @@
+{
+  // 實機 IV4 設定範例 / Sample real-IV4 settings.
+  //
+  // 用法 / How to use:
+  // 把本檔複製成輸出目錄下的 device.json 並填入現場數值。
+  // device.json 存在 → 接實機 IV4；不存在 → 跑模擬裝置。切換不需要重新編譯。
+  // Copy this to device.json in the output directory and fill in the line's values.
+  // device.json present → the real IV4; absent → mock devices. Switching needs no rebuild.
+  //
+  // 怎麼確認設定對不對 / How to confirm these values:
+  // 按一次「單次觸發」，操作訊息區會出現一行「IV4 電文 / frame: ...」，那是感測器送回來的
+  // 原始字串。數一數它的欄位（由 0 起算），再把下面三組索引對上去。
+  // 設定錯誤的表徵是「每張標籤都判退」，那與印刷不良、與感測器沒對焦看起來一模一樣，
+  // 所以請一定先看電文再調索引，不要憑判定結果猜。
+  // Press Trigger once and the log pane shows "IV4 電文 / frame: ..." — the raw string the
+  // sensor sent. Count its fields (zero-based) and match the three index lists below.
+  // A wrong layout presents as "every label rejects", which looks exactly like bad print and
+  // exactly like a sensor out of focus, so read the frame first rather than guessing from
+  // the verdicts.
+
+  "Host": "192.168.0.10",
+  "Port": 8500,
+
+  // 觸發命令，不含結束字元。實際命令依 IV4 端設定的通訊規格而定。
+  // Trigger command without its terminator; the actual command follows the IV4's configured
+  // communication spec.
+  "TriggerCommand": "T1",
+
+  // CR / Lf / CrLf
+  "Terminator": "Cr",
+  "FieldDelimiter": ",",
+
+  "ConnectTimeoutMs": 5000,
+  "ResponseTimeoutMs": 3000,
+
+  // 以此開頭的電文視為感測器自身異常 → 停線，不會被記成一張不良標籤。
+  // A frame starting with this is a sensor-level fault: stop the line, do not log a bad label.
+  "ErrorPrefix": "ER",
+
+  // 視為「該欄位沒有結果」的字樣，不分大小寫。空欄位一律視為沒有結果。
+  // Tokens meaning "no result in this field", case-insensitive. An empty field always counts.
+  "EmptyTokens": ["NG", "NOREAD", "----"],
+
+  // ── 欄位索引（由 0 起算）/ Field indexes, zero-based ──
+  //
+  // 以下數值是「假設」，不是已驗證的事實 —— 請照上面的方法用實機電文校正。
+  // These values are an assumption, not a verified fact. Correct them against a real frame.
+  //
+  // 條碼內容所在欄位。筆數要與配方的 ExpectedCodeCount 一致。
+  // Fields holding decoded code text; the count should match the recipe's ExpectedCodeCount.
+  "CodeDataFields": [1, 3],
+
+  // 條碼等級所在欄位，與 CodeDataFields 逐位對應。
+  // 感測器沒有輸出等級就留成空陣列 []，此時 Grade 為 null，配方的等級檢查自然失效。
+  // Grade fields, paired positionally with CodeDataFields. Leave [] when the sensor emits no
+  // grade: Grade is then null and the recipe's grade check has nothing to compare.
+  "CodeGradeFields": [2, 4],
+
+  // 字符檢測各區域文字所在欄位。筆數要與配方的 ExpectedCharacterRegionCount 一致。
+  // Fields holding each OCR region's text; the count should match the recipe's
+  // ExpectedCharacterRegionCount.
+  "CharacterTextFields": [5, 6]
+}

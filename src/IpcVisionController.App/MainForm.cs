@@ -32,6 +32,7 @@ internal sealed class MainForm : Form
     private readonly RecipeManager _recipes;
     private readonly IMotorController _motor;
     private readonly DatabaseManager _database;
+    private readonly Iv4VisionSensor? _sensor;
 
     private readonly Button _initializeButton = new() { Text = "初始化 Initialize", Width = 150, Height = 40 };
     private readonly Button _startButton = new() { Text = "開始 Start", Width = 120, Height = 40, Enabled = false };
@@ -116,16 +117,24 @@ internal sealed class MainForm : Form
     private int _passCount;
     private int _failCount;
 
+    /// <param name="sensor">
+    /// 實機 IV4；跑模擬裝置時為 null / The real IV4, or null when running on mocks.
+    /// 只用來把原始電文顯示在操作訊息區 —— 導入期間確認欄位索引的唯一依據。
+    /// Used only to surface raw frames in the log pane, which is the only thing that
+    /// confirms the configured field indexes during commissioning.
+    /// </param>
     public MainForm(
         InspectionSequencer sequencer,
         RecipeManager recipes,
         IMotorController motor,
-        DatabaseManager database)
+        DatabaseManager database,
+        Iv4VisionSensor? sensor = null)
     {
         _sequencer = sequencer ?? throw new ArgumentNullException(nameof(sequencer));
         _recipes = recipes ?? throw new ArgumentNullException(nameof(recipes));
         _motor = motor ?? throw new ArgumentNullException(nameof(motor));
         _database = database ?? throw new ArgumentNullException(nameof(database));
+        _sensor = sensor;
 
         Text = "IPC Vision Controller";
         Icon = LoadWindowIcon();
@@ -268,6 +277,11 @@ internal sealed class MainForm : Form
         _sequencer.StateChanged += OnStateChanged;
         _sequencer.CycleCompleted += OnCycleCompleted;
         _sequencer.LogEmitted += OnLogEmitted;
+
+        if (_sensor is not null)
+        {
+            _sensor.RawFrameReceived += OnRawFrameReceived;
+        }
 
         _refreshTimer.Interval = (int)RefreshPeriod.TotalMilliseconds;
         _refreshTimer.Tick += OnRefreshTick;
@@ -430,6 +444,17 @@ internal sealed class MainForm : Form
     });
 
     private void OnLogEmitted(object? sender, SequencerLogEventArgs e) => RunOnUi(() => AppendLog(e.Message));
+
+    /// <summary>
+    /// 顯示 IV4 的原始電文 / Show the IV4's raw frame.
+    /// 導入期間唯一能確認 device.json 欄位索引是否正確的依據。少了它,設定錯誤的表徵
+    /// 是「每張標籤都判退」—— 與印刷不良、與感測器沒對焦完全分不出來。
+    /// The only thing that confirms whether device.json's field indexes are right. Without
+    /// it a misconfiguration presents as "every label rejects", indistinguishable from bad
+    /// print and from a sensor out of focus.
+    /// </summary>
+    private void OnRawFrameReceived(object? sender, Iv4RawFrameEventArgs e) =>
+        RunOnUi(() => AppendLog($"IV4 電文 / frame: {e.Frame}"));
 
     private void OnRefreshTick(object? sender, EventArgs e)
     {

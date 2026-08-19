@@ -23,6 +23,10 @@ publish/
 *.db-shm
 recipe.json
 
+# 現場裝置設定：IP 與電文配置隨機台而異,不進版控 /
+# Live device settings: the IP and frame layout differ per machine, so not versioned.
+device.json
+
 # 作業系統與編輯器產生的雜物 / OS and editor litter
 #
 # 開發機是 macOS、產線機是 Windows，兩邊都會在資料夾裡自動落下中繼檔。
