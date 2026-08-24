@@ -8,16 +8,33 @@ namespace IpcVisionController.App;
 /// <summary>
 /// 應用程式入口與組裝根 / Entry point and composition root.
 ///
-/// 這裡是全程式唯一決定「用模擬還是實機」的地方,而且改由設定檔決定而非改程式:
-/// device.json 存在就接實機 IV4,不存在就跑模擬裝置。
-/// 為什麼不是編譯期開關 —— 現場沒有 SDK,也不該為了切換而重新發佈;
-/// 更重要的是「這台機器現在跑的是模擬還是實機」必須能當場看出來,
-/// 把模擬資料誤當實機結果簽核,是這支程式最不能發生的事。
-/// This is the only place that decides mock versus real hardware, and the decision now comes
-/// from a file rather than from an edit: device.json present means the real IV4, absent means
-/// mocks. Not a compile-time switch, because the line has no SDK and must not need a redeploy
-/// to swap — and more importantly because which one is running has to be visible on the spot.
-/// Signing off mock data as a real result is the worst thing this program could allow.
+/// 這裡是全程式唯一決定接哪些裝置的地方,規則只有兩條:
+/// device.json 存在就接實機 IV4；不存在就「拒絕啟動」,而不是退回模擬。
+/// This is the only place that decides which devices are attached, and there are just two
+/// rules: device.json present means the real IV4; absent means the program refuses to start
+/// rather than falling back to mocks.
+///
+/// 為什麼「找不到設定檔」不再自動跑模擬 /
+/// Why a missing settings file no longer silently mocks:
+/// 模擬裝置產生的判定看起來與實機結果完全一樣 —— 有條碼、有良率、有判退原因,還會寫進
+/// 追溯資料庫 —— 而觸發條件只是「一個檔案不在」。把設定漏放這種再普通不過的失誤,
+/// 變成一批可簽核卻毫無意義的生產紀錄,代價與機率都不成比例。
+/// 現在要跑模擬必須在啟動時明示 --mock,而那是不會手滑做出來的動作。
+/// Mock verdicts are indistinguishable from real ones — codes, a yield, reject reasons, all
+/// written to the traceability database — and the only trigger was a file being absent. That
+/// turned the most ordinary mistake there is, forgetting to place a settings file, into a
+/// batch of signable but meaningless production records. Mocks now require --mock on the
+/// command line, which is not something anyone does by accident.
+///
+/// 為什麼不是編譯期開關 / Why not a compile-time switch:
+/// 現場沒有 SDK,也不該為了切換裝置而重新發佈。
+/// The line has no SDK and must not need a redeploy to swap devices.
+///
+/// 進給軸不在這條規則內 —— 它沒有實機驅動可選,一律 MockMotorController。
+/// 那不是「模擬與實機二選一」,是「硬體還不存在」的佔位,兩件事不該共用同一個判斷。
+/// The feed axis is outside this rule: there is no real driver to choose, so it is always
+/// MockMotorController. That is not a mock-or-real choice but a placeholder for hardware that
+/// does not exist yet, and the two must not share one decision.
 /// </summary>
 internal static class Program
 {
@@ -43,8 +60,18 @@ internal static class Program
     /// </summary>
     internal static string DevicePath => Path.Combine(AppContext.BaseDirectory, DeviceFileName);
 
+    /// <summary>
+    /// 明示要求模擬裝置的啟動引數 / The argument that explicitly asks for mock devices.
+    /// 只給「沒有感測器但要看畫面」用途：改版面、給人看操作流程。
+    /// 從檔案總管雙擊永遠帶不到這個引數,所以產線的正常啟動路徑不可能誤入模擬。
+    /// For the one legitimate case: no sensor attached but the UI is needed — a layout change,
+    /// or walking someone through the operating sequence. Double-clicking from Explorer can
+    /// never supply it, so the line's normal launch path cannot land in mocks by accident.
+    /// </summary>
+    private const string MockArgument = "--mock";
+
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         // 由 csproj 的 Application* 屬性產生,設定 DPI 與視覺樣式
         // Generated from the csproj Application* properties; sets DPI mode and visual styles.
@@ -56,12 +83,40 @@ internal static class Program
         // 進給軸尚無實機驅動,一律模擬 / No real drive yet for the feed axis: always mocked.
         var motor = new MockMotorController();
 
-        // 設定檔讀不通就直接讓程式開不起來,不要默默退回模擬 ——
-        // 「以為接了實機、其實跑模擬」比「開不起來」危險得多。
-        // A broken settings file stops the program rather than silently falling back to mocks:
-        // believing the real sensor is attached while running on mocks is far more dangerous
-        // than not starting at all.
+        // 設定檔讀不通就直接讓程式開不起來 —— 內容錯誤與檔案不存在是兩件事,
+        // 前者一定是打錯了,不該被當成「這台機器要跑模擬」。
+        // A broken settings file stops the program outright: bad contents and no file at all are
+        // different things, and the former is always a typo rather than a decision to mock.
         var deviceOptions = Iv4Options.LoadAsync(DevicePath).GetAwaiter().GetResult();
+        var mockRequested = args.Contains(MockArgument, StringComparer.OrdinalIgnoreCase);
+
+        // 沒有設定檔又沒有明示模擬 —— 拒絕啟動。
+        // 這裡刻意不「開起來但停在離線狀態」:畫面開著就會有人按下去,而按下去就會產生紀錄。
+        // No settings file and no explicit request: refuse. Deliberately not "open but sit
+        // offline" — an open window gets pressed, and pressing it produces records.
+        if (deviceOptions is null && !mockRequested)
+        {
+            RefuseToStart();
+            return;
+        }
+
+        // 兩者同時存在時實機優先,但必須說出來。
+        // 實機優先是為了讓「產線桌面上留著一個帶 --mock 的捷徑」這種事無害;
+        // 而靜默忽略一個明示引數,正是本次要消滅的那類行為 —— 所以擋一個對話框。
+        // Real hardware wins when both are present, but not silently. Real-wins keeps a
+        // leftover --mock shortcut on the line's desktop harmless; announcing it avoids
+        // silently ignoring an explicit argument, which is the very behaviour being removed.
+        if (deviceOptions is not null && mockRequested)
+        {
+            MessageBox.Show(
+                $"{MockArgument} 已忽略：{DevicePath} 存在,將以實機 IV4 啟動。{Environment.NewLine}"
+                + $"要跑模擬請先移走該檔案。{Environment.NewLine}{Environment.NewLine}"
+                + $"{MockArgument} ignored: {DevicePath} exists, so the real IV4 is used. "
+                + "Move that file aside to run on mocks.",
+                "IPC Vision Controller",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
 
         Iv4VisionSensor? sensor = null;
         ICodeReader codeReader;
@@ -69,8 +124,8 @@ internal static class Program
 
         if (deviceOptions is null)
         {
-            // 模擬裝置：固定種子讓試機時的良率序列可重現
-            // Mock devices: fixed seeds make the dry-run verdict sequence reproducible.
+            // 明示要求的模擬裝置：固定種子讓畫面上的良率序列可重現
+            // Mocks, explicitly asked for: fixed seeds make the on-screen sequence reproducible.
             codeReader = new MockCodeReader(seed: 20260730) { NoReadRate = 0.03 };
             verifier = new MockCharacterVerifier(seed: 20260730) { FailRate = 0.08 };
         }
@@ -104,6 +159,43 @@ internal static class Program
         {
             DisposeAllAsync(sequencer, motor, codeReader, verifier, database).GetAwaiter().GetResult();
         }
+    }
+
+    /// <summary>
+    /// 拒絕啟動並說明原因 / Refuse to start, and say why.
+    ///
+    /// 訊息必須包含程式實際找過的完整路徑。最常見的兩種失誤 —— device.json 放在原始碼
+    /// 資料夾（csproj 只複製 device.sample.json,不會被帶到輸出目錄）、以及 Windows 隱藏
+    /// 副檔名時存成 device.json.txt —— 都只有把路徑印出來才會當場現形。
+    /// The message has to carry the full path actually searched. The two usual mistakes — a
+    /// device.json left in the source folder, which the csproj never copies, and a
+    /// device.json.txt saved with Windows hiding extensions — only become visible when the
+    /// path is spelled out.
+    /// </summary>
+    private static void RefuseToStart()
+    {
+        var message = string.Join(Environment.NewLine, [
+            "找不到裝置設定檔,程式不會以模擬資料啟動。",
+            "Device settings file not found. The program will not start on mock data.",
+            string.Empty,
+            DevicePath,
+            string.Empty,
+            "請把 device.sample.json 複製成上述路徑的 device.json（與執行檔同一資料夾,",
+            "不是原始碼資料夾）,填入現場數值後重新啟動。",
+            "Copy device.sample.json to that exact path as device.json — next to the executable,",
+            "not in the source folder — fill in the line's values, and restart.",
+            string.Empty,
+            $"若只是要檢視操作畫面而不接感測器,請以 {MockArgument} 啟動。",
+            "該模式的判定由產生器產出,與任何標籤無關,不可作為出貨依據。",
+            $"To inspect the UI without a sensor, start with {MockArgument}. Its verdicts come from",
+            "a generator, relate to no real label, and are not a shipping record.",
+        ]);
+
+        MessageBox.Show(
+            message,
+            "IPC Vision Controller",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Error);
     }
 
     /// <summary>

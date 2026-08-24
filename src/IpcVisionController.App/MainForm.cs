@@ -182,14 +182,14 @@ internal sealed class MainForm : Form
     {
         if (_sensor is null)
         {
-            AppendLog("模擬模式 / MOCK MODE");
-            AppendLog("判定來自固定種子的亂數產生器,與實際標籤無關,不可作為出貨依據。");
-            AppendLog("Verdicts come from a seeded generator, unrelated to any real label.");
-            AppendLog($"找不到裝置設定檔 / device settings file not found: {Program.DevicePath}");
-            AppendLog("接實機：把 device.sample.json 複製成上述路徑的 device.json（與 exe 同一資料夾,"
-                + "不是原始碼資料夾）,填入現場數值後重新啟動。");
-            AppendLog("To go live: copy device.sample.json to that exact path as device.json — next to "
-                + "the exe, not in the source folder — fill in the line's values, and restart.");
+            AppendLog("模擬模式 / MOCK MODE（以 --mock 啟動 / started with --mock）");
+            AppendLog("判定來自固定種子的產生器,與任何實際標籤無關,不可作為出貨依據,");
+            AppendLog("紀錄列表與追溯資料庫裡的內容同樣不是量測結果。");
+            AppendLog("Verdicts come from a seeded generator and relate to no real label. Neither the "
+                + "record list nor the traceability database holds measurements here.");
+            AppendLog($"接實機：關閉本程式,確認 {Program.DevicePath} 存在且內容正確,不帶引數重新啟動。");
+            AppendLog($"To go live: close this, ensure {Program.DevicePath} exists and is correct, and "
+                + "restart with no arguments.");
             return;
         }
 

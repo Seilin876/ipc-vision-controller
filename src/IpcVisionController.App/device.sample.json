@@ -2,10 +2,15 @@
   // 實機 IV4 設定範例 / Sample real-IV4 settings.
   //
   // 用法 / How to use:
-  // 把本檔複製成輸出目錄下的 device.json 並填入現場數值。
-  // device.json 存在 → 接實機 IV4；不存在 → 跑模擬裝置。切換不需要重新編譯。
-  // Copy this to device.json in the output directory and fill in the line's values.
-  // device.json present → the real IV4; absent → mock devices. Switching needs no rebuild.
+  // 把本檔複製成執行檔旁的 device.json 並填入現場數值。切換不需要重新編譯。
+  // device.json 存在 → 接實機 IV4；不存在 → 程式拒絕啟動,並顯示它找過的路徑。
+  // 不會退回模擬 —— 模擬判定與實機結果在畫面上分不出來,不該由「檔案漏放」觸發。
+  // 沒有感測器而只想看畫面時,以 --mock 啟動（標題列會標示,判定非量測結果）。
+  // Copy this to device.json next to the executable and fill in the line's values; no rebuild.
+  // device.json present → the real IV4; absent → the program refuses to start and shows the
+  // path it searched. It does not fall back to mocks: mock verdicts are indistinguishable from
+  // real ones on screen and must not be triggered by a misplaced file. To view the UI with no
+  // sensor, start with --mock (the title bar says so, and the verdicts are not measurements).
   //
   // 怎麼確認設定對不對 / How to confirm these values:
   // 按一次「單次觸發」，操作訊息區會出現一行「IV4 電文 / frame: ...」，那是感測器送回來的
