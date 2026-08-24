@@ -91,7 +91,13 @@ internal sealed class MainForm : Form
         Minimum = 0, Maximum = 100, Value = 70, Width = 60, Enabled = false,
     };
 
-    private readonly NumericUpDown _regionCountBox = new() { Minimum = 1, Maximum = 10, Value = 1, Width = 60 };
+    /// <summary>
+    /// 字符區域數；下限 0 表示不檢查 / Character regions; a minimum of 0 disables the check.
+    /// 感測器程式裡沒有 OCR 區域時必須能填 0,否則每張標籤都會以「區域數不足」判退。
+    /// Zero has to be reachable when the sensor program has no OCR region, or every label
+    /// rejects on the region count.
+    /// </summary>
+    private readonly NumericUpDown _regionCountBox = new() { Minimum = 0, Maximum = 10, Value = 1, Width = 60 };
     private readonly Button _saveRecipeButton = new() { Text = "儲存配方 Save", Width = 130, Height = 30 };
 
     private readonly ListView _recordList = new()
@@ -278,7 +284,7 @@ internal sealed class MainForm : Form
             _barcodeLengthBox,
             _checkGradeBox,
             _minimumGradeBox,
-            new Label { Text = "字符區域 Regions:", AutoSize = true, Padding = new Padding(12, 8, 0, 0) },
+            new Label { Text = "字符區域 Regions (0=不檢查 off):", AutoSize = true, Padding = new Padding(12, 8, 0, 0) },
             _regionCountBox,
             _saveRecipeButton,
         ]);
@@ -453,8 +459,17 @@ internal sealed class MainForm : Form
             };
 
             await _recipes.SaveAsync(recipe).ConfigureAwait(true);
+
+            // 0 印成 off 而不是 0：操作員讀到「0 region(s)」會以為是設定漏填,
+            // 而它其實是「本機種不檢查字符」的意思。
+            // Zero prints as off: an operator reading "0 region(s)" takes it for an unfilled
+            // field, when it actually says this product does not check characters.
+            var regions = recipe.ExpectedCharacterRegionCount == RecipeModel.NoCheck
+                ? "off"
+                : recipe.ExpectedCharacterRegionCount.ToString(CultureInfo.InvariantCulture);
+
             AppendLog(string.Create(CultureInfo.InvariantCulture,
-                $"配方已儲存 / Recipe saved: {recipe.ModelName} ({recipe.ExpectedCodeCount} code(s), length {recipe.BarcodeLength}, grade ≥ {recipe.MinimumCodeGrade?.ToString(CultureInfo.InvariantCulture) ?? "off"}, {recipe.ExpectedCharacterRegionCount} region(s))"));
+                $"配方已儲存 / Recipe saved: {recipe.ModelName} ({recipe.ExpectedCodeCount} code(s), length {recipe.BarcodeLength}, grade ≥ {recipe.MinimumCodeGrade?.ToString(CultureInfo.InvariantCulture) ?? "off"}, regions {regions})"));
         }
         catch (InvalidRecipeException ex)
         {

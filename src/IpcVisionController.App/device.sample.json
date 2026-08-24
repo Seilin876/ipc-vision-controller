@@ -62,7 +62,15 @@
   "CodeGradeFields": [2, 4],
 
   // 字符檢測各區域文字所在欄位。筆數要與配方的 ExpectedCharacterRegionCount 一致。
+  // 感測器程式裡沒有 OCR 區域時清成 []，並把配方的 ExpectedCharacterRegionCount 設 0。
+  // 只清這裡而配方仍要求區域數，會以「區域數不足」判退每一張標籤；
+  // 只設配方 0 而這裡仍留著索引，回報回來的區域仍會被逐區判定（那些欄位讀不到就判退）。
+  // 兩邊要一致。
   // Fields holding each OCR region's text; the count should match the recipe's
-  // ExpectedCharacterRegionCount.
+  // ExpectedCharacterRegionCount. Empty this to [] when the sensor program has no OCR region,
+  // and set the recipe's ExpectedCharacterRegionCount to 0. Clearing only this while the recipe
+  // still demands regions rejects every label on the region count; setting only the recipe to 0
+  // while indexes remain here still judges the regions that report, and fields that read as
+  // nothing still reject. Keep the two consistent.
   "CharacterTextFields": [5, 6]
 }

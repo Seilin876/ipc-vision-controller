@@ -20,7 +20,16 @@
   // the SR-series matching level runs 0–100, higher is better.
   "MinimumCodeGrade": 70,
 
-  // 一次觸發應回報幾個字符檢測區域。IV4 最多 10 個。
-  // Character regions expected from one trigger; the IV4 supports up to 10.
+  // 一次觸發應回報幾個字符檢測區域。IV4 最多 10 個。0 表示本機種不做字符檢測。
+  // 只有在感測器程式裡根本沒有 OCR 區域時才填 0，否則每張標籤都會以「區域數不足」判退。
+  // 填 0 時 device.json 的 CharacterTextFields 也要清成 []：
+  // 兩者描述的是不同的事 —— 一個是感測器輸出什麼，一個是這個機種要求什麼。
+  // 讀碼筆數不能填 0，所以本站永遠至少檢查一項。
+  // Character regions expected from one trigger; the IV4 supports up to 10. Zero means this
+  // product has no character verification — use it only when the sensor program has no OCR
+  // region, or every label rejects on the region count. When it is zero, also empty
+  // CharacterTextFields in device.json to []: the two describe different things, namely what
+  // the sensor emits versus what this product requires. The code count cannot be zero, so the
+  // station always checks at least one thing.
   "ExpectedCharacterRegionCount": 2
 }

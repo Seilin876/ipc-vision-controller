@@ -127,15 +127,36 @@ public sealed class RecipeManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task LoadAsync_WithZeroExpectedCharacterRegionCount_ThrowsInvalidRecipe()
+    public async Task LoadAsync_WithZeroExpectedCharacterRegionCount_MeansNoCharacterCheck()
     {
         var manager = NewManager();
         await File.WriteAllTextAsync(manager.FilePath, """
             { "ModelName": "MODEL-I", "ExpectedCharacterRegionCount": 0 }
             """);
 
-        // 同理:期望 0 個區域等於字符檢測整站失效
-        // Likewise: expecting zero regions disables the character-verification station entirely.
+        // 與條碼筆數不同,0 個區域是合法設定:感測器程式裡沒有 OCR 區域的機種確實存在,
+        // 拒絕載入的話那些機種每張標籤都會以「區域數不足」判退。
+        // 讀碼筆數仍要求為正（見上一個測試）,所以本站不會變成什麼都不檢查。
+        // Unlike the code count, zero regions is a legal configuration: products whose sensor
+        // program has no OCR region do exist, and refusing the recipe rejects every one of their
+        // labels on the region count. The code count is still required to be positive (see the
+        // test above), so the station never ends up checking nothing.
+        var recipe = await manager.LoadAsync();
+
+        Assert.Equal(RecipeModel.NoCheck, recipe.ExpectedCharacterRegionCount);
+    }
+
+    [Fact]
+    public async Task LoadAsync_WithNegativeExpectedCharacterRegionCount_ThrowsInvalidRecipe()
+    {
+        var manager = NewManager();
+        await File.WriteAllTextAsync(manager.FilePath, """
+            { "ModelName": "MODEL-I2", "ExpectedCharacterRegionCount": -1 }
+            """);
+
+        // 0 有意義,負數沒有 —— 那只會是手改配方時打錯
+        // Zero means something; a negative number cannot, and only arises from a typo in a
+        // hand-edited recipe.
         await Assert.ThrowsAsync<InvalidRecipeException>(() => manager.LoadAsync());
     }
 

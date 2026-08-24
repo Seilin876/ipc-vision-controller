@@ -44,10 +44,32 @@ public sealed class RecipeModel
     public int? MinimumCodeGrade { get; set; }
 
     /// <summary>
-    /// 一次觸發應回報的字符檢測區域數 / Character regions expected from one trigger.
-    /// 同樣要檢查數量：區域沒被觸發到就不會回報,而「沒回報」不等於「合格」。
-    /// The count matters here too: an untriggered region simply reports nothing, and
-    /// "nothing reported" is not the same as "passed".
+    /// 一次觸發應回報的字符檢測區域數；<see cref="NoCheck"/> 表示本機種不做字符檢測 /
+    /// Character regions expected from one trigger; <see cref="NoCheck"/> means this product
+    /// has no character verification.
+    ///
+    /// 有設數量時要檢查數量：區域沒被觸發到就不會回報,而「沒回報」不等於「合格」。
+    /// 設為 <see cref="NoCheck"/> 的唯一正當理由是感測器程式裡根本沒有 OCR 區域 ——
+    /// 此時原本會以「區域數不足」判退每一張標籤,而那是設定表達不出需求,不是標籤有問題。
+    /// When a count is set it is enforced: an untriggered region simply reports nothing, and
+    /// "nothing reported" is not "passed". The one legitimate reason to disable it is a sensor
+    /// program with no OCR region at all, where the count check otherwise rejects every single
+    /// label — a configuration unable to express the requirement, not a defect on the label.
+    ///
+    /// 只關掉「數量」這一項,不關掉已回報區域的判定（見 <see cref="Machine.LabelJudge"/>）。
+    /// 感測器既然回報了結果,失敗就是失敗;要真正停用字符檢測,device.json 的
+    /// CharacterTextFields 也必須清空 —— 那兩個檔描述的是不同的事:
+    /// 一個是「感測器輸出什麼」,一個是「這個機種要求什麼」。
+    /// Only the count is disabled, not the judging of regions that did report (see
+    /// <see cref="Machine.LabelJudge"/>): if the sensor returned a result, a failure is still a
+    /// failure. Genuinely retiring character verification also means emptying
+    /// CharacterTextFields in device.json — the two files describe different things, namely what
+    /// the sensor emits versus what this product requires.
+    ///
+    /// <see cref="ExpectedCodeCount"/> 仍必須為正,所以本站永遠至少檢查一項,
+    /// 不存在「全部關掉、一律 PASS」的配方。
+    /// <see cref="ExpectedCodeCount"/> must still be positive, so the station always checks at
+    /// least one thing; no recipe can switch everything off and pass every part.
     /// </summary>
     public int ExpectedCharacterRegionCount { get; set; } = 1;
 
@@ -73,10 +95,15 @@ public sealed class RecipeModel
                 $"ExpectedCodeCount 必須為正整數,目前為 {ExpectedCodeCount} / must be positive, got {ExpectedCodeCount}.");
         }
 
-        if (ExpectedCharacterRegionCount <= 0)
+        // 0 是合法的（不檢查字符區域數,見屬性說明）,負數不是。
+        // 條碼筆數仍要求為正,因此本站不可能變成「什麼都不檢查」。
+        // Zero is legal — it disables the region count check, see the property — and a negative
+        // number is not. The code count is still required to be positive, so the station cannot
+        // be configured to check nothing at all.
+        if (ExpectedCharacterRegionCount < 0)
         {
             throw new InvalidRecipeException(
-                $"ExpectedCharacterRegionCount 必須為正整數,目前為 {ExpectedCharacterRegionCount} / must be positive, got {ExpectedCharacterRegionCount}.");
+                $"ExpectedCharacterRegionCount 不可為負,目前為 {ExpectedCharacterRegionCount}（0 表示不檢查）/ must not be negative, got {ExpectedCharacterRegionCount} (0 disables the check).");
         }
 
         if (BarcodeLength < 0)

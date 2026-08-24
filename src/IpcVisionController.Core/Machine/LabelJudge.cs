@@ -123,7 +123,14 @@ public static class LabelJudge
     {
         // 區域沒被觸發到就不會回報,而「沒回報」不等於「合格」
         // An untriggered region simply reports nothing, and nothing reported is not a pass.
-        if (results.Count < recipe.ExpectedCharacterRegionCount)
+        //
+        // NoCheck 只跳過數量這一項,底下的逐區判定照跑 ——
+        // 配方說「本機種不要求字符區域」,不等於「回報回來的失敗結果可以忽略」。
+        // NoCheck skips the count only; the per-region checks below still run. A recipe saying
+        // this product requires no regions does not say that failures which did come back may
+        // be ignored.
+        if (recipe.ExpectedCharacterRegionCount != RecipeModel.NoCheck
+            && results.Count < recipe.ExpectedCharacterRegionCount)
         {
             reasons.Add(Format(
                 $"字符區域數不足：回報 {results.Count},配方要求 {recipe.ExpectedCharacterRegionCount} / character regions {results.Count} < expected {recipe.ExpectedCharacterRegionCount}"));

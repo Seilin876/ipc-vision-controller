@@ -202,6 +202,38 @@ public sealed class LabelJudgeTests
     }
 
     [Fact]
+    public void Evaluate_WithRegionCheckOffAndNothingReported_Passes()
+    {
+        // 感測器程式裡沒有 OCR 區域的機種:區域數 0 必須真的讓整張標籤合格。
+        // 這是本設定存在的唯一理由 —— 否則那些機種每一張標籤都會判退。
+        // A product whose sensor program has no OCR region: zero regions has to actually pass
+        // the label. That is the only reason the setting exists — otherwise every label of
+        // such a product rejects.
+        var reason = LabelJudge.Evaluate(Recipe(regions: RecipeModel.NoCheck), [Code()], []);
+
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void Evaluate_WithRegionCheckOff_StillJudgesRegionsThatDidReport()
+    {
+        // 關掉的是「數量」,不是「已回報結果的判定」。
+        // 若連回報回來的失敗都忽略,那就是把一整個檢查站靜默關掉 ——
+        // 而現場設定 0 的用意是「本機種沒有字符檢測」,不是「字符不良可以出貨」。
+        // What is switched off is the count, not the judging of results that did come back.
+        // Ignoring reported failures too would silently retire an entire inspection station,
+        // whereas setting zero means "this product has no character verification", not
+        // "character defects may ship".
+        var reason = LabelJudge.Evaluate(
+            Recipe(regions: RecipeModel.NoCheck),
+            [Code()],
+            [Region(text: null, judge: Verdict.Fail)]);
+
+        Assert.NotNull(reason);
+        Assert.Contains("recognised nothing", reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Evaluate_WithAnUnrecognisedRegion_Rejects()
     {
         var reason = LabelJudge.Evaluate(Recipe(), [Code()], [Region(text: null, judge: Verdict.Fail)]);
