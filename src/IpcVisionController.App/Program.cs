@@ -87,6 +87,68 @@ internal static class Program
         // Generated from the csproj Application* properties; sets DPI mode and visual styles.
         ApplicationConfiguration.Initialize();
 
+        // 組裝與執行必須分開包住 / Composing and running have to be wrapped separately.
+        //
+        // 本專案是 WinExe —— 沒有主控台。Application.Run 之前拋出的任何例外都會讓行程
+        // 直接結束,而畫面上什麼都不會出現:雙擊 exe,毫無反應。
+        // 組裝階段偏偏是最會拋例外的地方（設定檔格式、欄位驗證、資料庫路徑）,
+        // 於是「大聲拒絕啟動」的設計會退化成「安靜死掉」—— 那比默默跑模擬更難查,
+        // 因為連一句訊息都沒有。
+        // This is a WinExe and has no console. Any exception thrown before Application.Run ends the
+        // process with nothing on screen: double-click the exe, nothing happens. The composition
+        // phase is precisely where exceptions come from — settings format, field validation, database
+        // paths — so a design meant to refuse loudly degrades into dying silently, which is harder to
+        // diagnose than quietly running on mocks, because there is not even a message.
+        Composition composed;
+        try
+        {
+            var composition = Compose(args);
+            if (composition is null)
+            {
+                // 已經用對話框說明過原因 / The reason was already shown in a dialog.
+                return;
+            }
+
+            composed = composition;
+        }
+        catch (Exception ex)
+        {
+            ReportStartupFailure(ex);
+            return;
+        }
+
+        // 裝置與資料庫由此處擁有,故在此處處置；Sequencer 只處置自己的權杖來源。
+        // The devices and database are owned here, so they are disposed here; the sequencer
+        // disposes only its own token source.
+        try
+        {
+            using var form = new MainForm(
+                composed.Sequencer, composed.Recipes, composed.Database, composed.Devices);
+            Application.Run(form);
+        }
+        finally
+        {
+            DisposeAllAsync(composed.Sequencer, [.. composed.Devices.All, composed.Database])
+                .GetAwaiter().GetResult();
+        }
+    }
+
+    /// <summary>組裝結果 / What composition produced.</summary>
+    private sealed record Composition(
+        InspectionSequencer Sequencer,
+        RecipeManager Recipes,
+        DatabaseManager Database,
+        DeviceSet Devices);
+
+    /// <summary>
+    /// 依設定組裝整個系統 / Compose the whole system from the settings.
+    /// </summary>
+    /// <returns>
+    /// 組裝結果；已向使用者說明並決定不啟動時為 null /
+    /// The composition, or null when the user has been told why the program will not start.
+    /// </returns>
+    private static Composition? Compose(string[] args)
+    {
         var baseDirectory = AppContext.BaseDirectory;
         var dataDirectory = Path.Combine(baseDirectory, "data");
 
@@ -107,7 +169,7 @@ internal static class Program
         if (settings is null && !mockRequested)
         {
             RefuseToStart();
-            return;
+            return null;
         }
 
         // 兩者同時存在時實機優先,但必須說出來。
@@ -163,18 +225,38 @@ internal static class Program
         var sequencer = new InspectionSequencer(
             devices.Motor, devices.CodeReader, devices.Verifier, database, recipes);
 
-        // 裝置與資料庫由此處擁有,故在此處處置；Sequencer 只處置自己的權杖來源。
-        // The devices and database are owned here, so they are disposed here; the sequencer
-        // disposes only its own token source.
-        try
-        {
-            using var form = new MainForm(sequencer, recipes, database, devices);
-            Application.Run(form);
-        }
-        finally
-        {
-            DisposeAllAsync(sequencer, [.. devices.All, database]).GetAwaiter().GetResult();
-        }
+        return new Composition(sequencer, recipes, database, devices);
+    }
+
+    /// <summary>
+    /// 啟動失敗時把原因說出來 / Say why startup failed.
+    ///
+    /// 沒有主控台可以印,所以只剩對話框。訊息必須包含設定檔的完整路徑與例外本文 ——
+    /// 現場拿不到堆疊追蹤,而例外本文正是驗證邏輯特意寫給人看的那句話。
+    /// There is no console to print to, so a dialog is all that is left. The message has to carry the
+    /// settings file's full path and the exception's own text: the line cannot read a stack trace, and
+    /// that text is the sentence the validation deliberately wrote for a person.
+    /// </summary>
+    private static void ReportStartupFailure(Exception ex)
+    {
+        var message = string.Join(Environment.NewLine, [
+            "程式無法啟動 / The program could not start.",
+            string.Empty,
+            ex.Message,
+            string.Empty,
+            $"裝置設定檔 / device settings file:{Environment.NewLine}{DevicePath}",
+            string.Empty,
+            "多數情況是這個檔案的內容不合。改好後重新啟動；",
+            $"若要在沒有裝置的情況下檢視畫面,請以 {MockArgument} 啟動。",
+            "Most often the contents of that file are not usable. Fix it and restart, or start with "
+                + $"{MockArgument} to view the UI with no devices attached.",
+        ]);
+
+        MessageBox.Show(
+            message,
+            "IPC Vision Controller",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Error);
     }
 
     /// <summary>
