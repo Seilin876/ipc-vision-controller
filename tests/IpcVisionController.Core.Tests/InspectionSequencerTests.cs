@@ -229,6 +229,12 @@ public sealed class InspectionSequencerTests : IDisposable
 
         var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
 
+        // 相隔格數預設為 0，所以第一個週期就該完成判定；回 null 代表暫存邏輯把
+        // 「兩台看同一張」的情況也當成了要等 / With the default offset of zero the very first
+        // cycle must produce a verdict; a null here would mean the shift register also makes the
+        // both-sensors-one-label case wait.
+        Assert.NotNull(record);
+
         Assert.Equal(Verdict.Pass, record.FinalJudge);
         Assert.Null(record.RejectReason);
         Assert.Equal(["ABC123456789"], record.CodeResults.Select(r => r.Data));
@@ -263,6 +269,12 @@ public sealed class InspectionSequencerTests : IDisposable
 
         var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
 
+        // 相隔格數預設為 0，所以第一個週期就該完成判定；回 null 代表暫存邏輯把
+        // 「兩台看同一張」的情況也當成了要等 / With the default offset of zero the very first
+        // cycle must produce a verdict; a null here would mean the shift register also makes the
+        // both-sensors-one-label case wait.
+        Assert.NotNull(record);
+
         // 不良品也要留下讀到的內容,否則無法追溯 / A reject still needs its payload, or it cannot be traced.
         Assert.Equal(Verdict.Fail, record.FinalJudge);
         Assert.Equal(["ABC123456789"], record.CodeResults.Select(r => r.Data));
@@ -278,6 +290,12 @@ public sealed class InspectionSequencerTests : IDisposable
         rig.Reader.ForceNoRead = true;
 
         var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+
+        // 相隔格數預設為 0，所以第一個週期就該完成判定；回 null 代表暫存邏輯把
+        // 「兩台看同一張」的情況也當成了要等 / With the default offset of zero the very first
+        // cycle must produce a verdict; a null here would mean the shift register also makes the
+        // both-sensors-one-label case wait.
+        Assert.NotNull(record);
 
         // 這是整份測試的核心：工件不良不等於設備故障
         // The heart of this file: a bad part is not a broken machine.
@@ -295,6 +313,12 @@ public sealed class InspectionSequencerTests : IDisposable
         rig.Reader.ForceNoRead = true;
 
         var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+
+        // 相隔格數預設為 0，所以第一個週期就該完成判定；回 null 代表暫存邏輯把
+        // 「兩台看同一張」的情況也當成了要等 / With the default offset of zero the very first
+        // cycle must produce a verdict; a null here would mean the shift register also makes the
+        // both-sensors-one-label case wait.
+        Assert.NotNull(record);
 
         // 舊架構在讀碼失敗時略過拍照以省下一趟行程;現在兩者共用同一次進給,
         // 沒有行程可省,而少一組結果就少一半的判退依據。
@@ -348,6 +372,12 @@ public sealed class InspectionSequencerTests : IDisposable
         rig.Reader.ForcedCodes = ["SHORTY12", "SHORTY34"];
 
         var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+
+        // 相隔格數預設為 0，所以第一個週期就該完成判定；回 null 代表暫存邏輯把
+        // 「兩台看同一張」的情況也當成了要等 / With the default offset of zero the very first
+        // cycle must produce a verdict; a null here would mean the shift register also makes the
+        // both-sensors-one-label case wait.
+        Assert.NotNull(record);
 
         Assert.Equal("MODEL-B", record.ModelName);
         Assert.Equal(Verdict.Pass, record.FinalJudge);
@@ -743,6 +773,207 @@ public sealed class InspectionSequencerTests : IDisposable
     /// A short pitch at high velocity puts a cycle at roughly 20 ms. Timeouts default
     /// generous; the tests that care tighten the one they are exercising.
     /// </summary>
+    // ── 兩站相隔的暫存 / The two-station shift register ──────────────────────
+
+    /// <summary>
+    /// 相隔 k 格的站別設定 / Options for stations k pitches apart.
+    /// </summary>
+    private static SequencerOptions OffsetOptions(int pitches)
+    {
+        var fast = FastOptions();
+        return new SequencerOptions
+        {
+            FeedPitchPulses = fast.FeedPitchPulses,
+            FeedSpeedPulsePerSecond = fast.FeedSpeedPulsePerSecond,
+            FeedTimeout = fast.FeedTimeout,
+            CodeReadTimeout = fast.CodeReadTimeout,
+            CharacterVerifyTimeout = fast.CharacterVerifyTimeout,
+            ConnectTimeout = fast.ConnectTimeout,
+            CycleInterval = TimeSpan.Zero,
+            InspectionOffsetPitches = pitches,
+        };
+    }
+
+    [Fact]
+    public async Task WithAnOffset_TheFirstLabelsAreScannedButLeaveNoRecord()
+    {
+        // 標籤要走 4 格才抵達檢測站,所以前 4 個週期沒有任何一張可以判定。
+        // 這是現場一定會看到、卻最容易被當成程式壞掉的行為。
+        // A label needs four pitches to reach the verification station, so none can be judged in the
+        // first four cycles. This is the behaviour the line is certain to notice and most likely to
+        // read as a broken program.
+        await using var rig = NewRig(OffsetOptions(4));
+        await rig.Sequencer.InitializeAsync();
+
+        for (var i = 0; i < 4; i++)
+        {
+            Assert.Null(await rig.Sequencer.RunCycleAsync(CancellationToken.None));
+        }
+
+        Assert.Empty(rig.Store.Snapshot());
+        Assert.Equal(0, rig.Sequencer.CycleCount);
+    }
+
+    [Fact]
+    public async Task WithAnOffset_TheVerifierIsNotTriggeredWhileTheQueueFills
+        ()
+    {
+        // 檢測站底下躺著的是開機前就越過讀碼站的標籤。拍它會得到一個無法歸屬的結果,
+        // 而把無法歸屬的結果寫進追溯資料,比完全沒有紀錄糟得多。
+        // What lies under the verifier passed the reading station before this run began. Capturing it
+        // yields a result belonging to no known label, and an unattributable row in the traceability
+        // data is far worse than no row at all.
+        await using var rig = NewRig(OffsetOptions(2));
+        await rig.Sequencer.InitializeAsync();
+
+        var triggersBefore = rig.Verifier.TriggerCount;
+        await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+        await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+
+        Assert.Equal(triggersBefore, rig.Verifier.TriggerCount);
+    }
+
+    [Fact]
+    public async Task WithAnOffset_TheRecordPairsTheCodeScannedThatManyCyclesEarlier()
+    {
+        // 這一項是整個暫存存在的理由。相隔 2 格時,第 3 個週期的紀錄必須是
+        // 第 1 個週期讀到的條碼,配上第 3 個週期字符檢測回報的結果。
+        // 若程式當成相隔 0 格,紀錄會把第 3 張的條碼與第 1 張的字符湊在一起 ——
+        // 不會報錯、良率正常,但兩半不屬於同一張標籤,而且每一筆看起來都完整。
+        // This is why the shift register exists. With an offset of two, the record from the third cycle
+        // has to carry the code read in the first, paired with what the verifier reported in the third.
+        // Assuming an offset of zero would pair the third label's code with the first label's
+        // characters: nothing errors, the yield looks normal, the two halves belong to different labels,
+        // and every row looks complete.
+        await using var rig = NewRig(OffsetOptions(2));
+        await rig.Sequencer.InitializeAsync();
+
+        rig.Reader.ForcedCodes = ["FIRST-LABEL0"];
+        Assert.Null(await rig.Sequencer.RunCycleAsync(CancellationToken.None));
+
+        rig.Reader.ForcedCodes = ["SECONDLABEL"];
+        Assert.Null(await rig.Sequencer.RunCycleAsync(CancellationToken.None));
+
+        rig.Reader.ForcedCodes = ["THIRD-LABEL"];
+        rig.Verifier.ForcedTexts = ["REGION-3RD"];
+        var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+
+        Assert.NotNull(record);
+        Assert.Equal(["FIRST-LABEL0"], record.CodeResults.Select(r => r.Data));
+        Assert.Equal(["REGION-3RD"], record.CharacterResults.Select(r => r.Text));
+    }
+
+    [Fact]
+    public async Task WithAnOffset_LabelsAreJudgedByTheRecipeInForceWhenTheyWereScanned()
+    {
+        // 換線那一刻,兩站之間的標籤屬於舊機種 —— 它們是在舊配方下被掃的,就該用舊配方判定。
+        // 用當下的新配方判,等於把在製品用下一個機種的規格判退。
+        // At a changeover the labels between the stations belong to the outgoing product: they were
+        // scanned under the old recipe and must be judged by it. Judging them against the incoming one
+        // rejects work in progress by the next product's specification.
+        await using var rig = NewRig(OffsetOptions(1));
+        await rig.Sequencer.InitializeAsync();
+
+        rig.Reader.ForcedCodes = ["OLDMODEL0001"];
+        Assert.Null(await rig.Sequencer.RunCycleAsync(CancellationToken.None));
+
+        // 換線：新機種要求兩筆條碼,而在製品那一張只有一筆
+        // Changeover: the incoming product wants two codes, and the label in flight has one.
+        await rig.Recipes.SaveAsync(new RecipeModel
+        {
+            ModelName = "MODEL-NEW",
+            ExpectedCodeCount = 2,
+            BarcodeLength = RecipeModel.NoCheck,
+            ExpectedCharacterRegionCount = 1,
+        });
+
+        var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+
+        Assert.NotNull(record);
+        Assert.Equal("DEFAULT", record.ModelName);
+        Assert.Equal(Verdict.Pass, record.FinalJudge);
+    }
+
+    [Fact]
+    public async Task WithAnOffset_StoppingSaysHowManyLabelsWereLeftUnverified()
+    {
+        // 那幾張標籤已經越過讀碼站,現在停在兩站之間,既沒有被判定,也不會有任何紀錄提到
+        // 它們存在過。現場必須知道有幾張,才有機會挑出來重驗 —— 少了這一句,它們會安靜地
+        // 流到下游。
+        // Those labels passed the reading station and now sit between the two, unjudged, with nothing
+        // anywhere recording that they existed. The line has to be told how many to have any chance of
+        // pulling them; without that message they travel downstream in silence.
+        await using var rig = NewRig(OffsetOptions(3));
+        await rig.Sequencer.InitializeAsync();
+
+        await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+        await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+
+        rig.Sequencer.Start();
+        await rig.Sequencer.StopAsync();
+
+        Assert.Contains(
+            rig.Logs(),
+            line => line.Contains("已掃碼但未完成檢測", StringComparison.Ordinal));
+        Assert.Empty(rig.Store.Snapshot());
+    }
+
+    [Fact]
+    public async Task WithAnOffset_AfterAStopTheQueueRefillsSoTheFirstRecordCannotMispair()
+    {
+        // 停機作廢了兩站之間的在製品,所以下一輪必須重新填滿。
+        // 若佇列跨過停機留了下來,復產後的第一筆紀錄會拿停機前掃到的條碼,配上復產後拍到的字符
+        // —— 而停機期間操作員多半已經把那幾張標籤抽掉、或把料帶拉動過,那兩半根本不屬於同一張。
+        // A stop voids the work in progress between the stations, so the next run has to fill again. Were
+        // the queue to survive the stop, the first record after resuming would pair a code scanned before
+        // it with characters captured after — and by then the operator has most likely pulled those
+        // labels out or moved the web, so the two halves belong to nothing in common.
+        await using var rig = NewRig(OffsetOptions(1));
+        await rig.Sequencer.InitializeAsync();
+
+        rig.Reader.ForcedCodes = ["BEFORESTOP01"];
+        Assert.Null(await rig.Sequencer.RunCycleAsync(CancellationToken.None));
+
+        rig.Sequencer.Start();
+        await rig.Sequencer.StopAsync();
+
+        // 復產：第一個週期仍然沒有紀錄,因為佇列是空的
+        // Resuming: the first cycle still yields nothing, because the queue is empty.
+        rig.Reader.ForcedCodes = ["AFTERSTOP001"];
+        Assert.Null(await rig.Sequencer.RunCycleAsync(CancellationToken.None));
+
+        rig.Verifier.ForcedTexts = ["REGION-NEW"];
+        var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
+
+        // 停機前掃到的那一張不曾、也不該出現在任何紀錄裡
+        // The label scanned before the stop never appears in any record, and must not.
+        Assert.NotNull(record);
+        Assert.Equal(["AFTERSTOP001"], record.CodeResults.Select(r => r.Data));
+        Assert.DoesNotContain(
+            rig.Store.Snapshot(),
+            r => r.CodeResults.Any(c => c.Data == "BEFORESTOP01"));
+    }
+
+    [Fact]
+    public async Task WithAnOffset_CyclingStillProducesARecordPerLabelOnceTheQueueIsFull()
+    {
+        // 暫存只延後第一筆,不減少總量。填滿之後每一格進給都該產生一筆紀錄,
+        // 否則產能就被這個機制吃掉了。
+        // The register only delays the first record; it does not reduce the total. Once full, every pitch
+        // must still yield one record, or the mechanism has eaten throughput.
+        await using var rig = NewRig(OffsetOptions(2));
+        await rig.Sequencer.InitializeAsync();
+
+        rig.Sequencer.Start();
+
+        await WaitUntilAsync(
+            () => rig.Sequencer.CycleCount >= 5,
+            "填滿後持續產生紀錄 / records to keep coming once the queue is full");
+
+        await rig.Sequencer.StopAsync();
+        Assert.True(rig.Store.Snapshot().Count >= 5);
+    }
+
     private static SequencerOptions FastOptions(
         TimeSpan? feedTimeout = null,
         TimeSpan? codeReadTimeout = null,

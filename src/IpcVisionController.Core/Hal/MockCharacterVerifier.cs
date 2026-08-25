@@ -61,6 +61,19 @@ public sealed class MockCharacterVerifier : ICharacterVerifier
     /// </summary>
     public IReadOnlyList<string?>? ForcedTexts { get; set; }
 
+    /// <summary>
+    /// 被觸發過幾次 / How many times this has been triggered.
+    ///
+    /// 「有沒有被觸發」有時比「回了什麼」更重要:兩站相隔數格時,標籤還沒走到檢測站的那幾個
+    /// 週期刻意不觸發它 —— 那時檢測站底下躺的是無法歸屬的標籤。而「沒有觸發」這件事無法從
+    /// 回傳值觀察,只能由計數器證明。
+    /// Whether it fired matters more than what it returned, sometimes: while the stations are several
+    /// pitches apart, the cycles before a label reaches the verifier deliberately do not trigger it,
+    /// because what sits under it then belongs to no known label. Not firing cannot be observed from a
+    /// return value; only a counter can show it.
+    /// </summary>
+    public int TriggerCount { get; private set; }
+
     /// <summary>測試用：強制沒有任何區域回報 / Test hook: force an empty result list.</summary>
     public bool ForceNoResult { get; set; }
 
@@ -88,6 +101,8 @@ public sealed class MockCharacterVerifier : ICharacterVerifier
         {
             throw new InvalidOperationException($"{Name} 尚未連線 / is not connected.");
         }
+
+        TriggerCount++;
 
         var latency = ForcedLatency ?? RandomLatency();
         await Task.Delay(latency, cancellationToken).ConfigureAwait(false);

@@ -97,9 +97,43 @@ public sealed class InspectionSequencer : IAsyncDisposable
     private readonly object _stateGate = new();
     private MachineState _state = MachineState.Offline;
 
+    /// <summary>
+    /// 已掃碼、還沒走到字符檢測站的標籤 / Labels scanned but not yet at the verification station.
+    ///
+    /// 兩站相隔 k 格,所以讀碼站看到的第 N 張要等 k 次進給才抵達檢測站。這個佇列就是那段距離
+    /// 在程式裡的樣子:進給後把本次的讀碼結果推入,再從另一端取出 k 次進給前的那一張,
+    /// 與檢測站此刻回報的結果配成一筆紀錄。
+    /// The two stations are k pitches apart, so the label the reader sees as N needs k feeds to reach
+    /// the verifier. This queue is what that distance looks like in code: after each feed the fresh
+    /// code results go in one end, and the label from k feeds ago comes out the other to be paired
+    /// with what the verifier reports now.
+    ///
+    /// 為什麼連配方一起存 / Why the recipe is stored alongside:
+    /// 配方是每張標籤重讀一次的,好讓換線後的下一張立即生效。但換線那一刻,佇列裡的標籤屬於
+    /// 舊機種 —— 它們是在舊配方下被掃的,就該用舊配方判定。存下當時的配方,換線才不會把
+    /// 在製品用新規格判退。
+    /// The recipe is re-read per label so a changeover takes effect on the very next one. At the moment
+    /// of a changeover, though, the labels in this queue belong to the outgoing product: they were
+    /// scanned under the old recipe and must be judged by it. Capturing the recipe with the label is
+    /// what stops a changeover from rejecting work in progress against the incoming specification.
+    ///
+    /// 執行緒 / Threading:
+    /// 只由產線工作（RunLoopAsync／RunSingleCycleAsync）觸碰,或在該工作已結束後由 StopAsync
+    /// 觸碰。狀態機保證不會有兩個週期同時進行,因此不需要額外上鎖。
+    /// Touched only by the line task, or by StopAsync after that task has completed. The state machine
+    /// guarantees no two cycles overlap, so no further locking is needed.
+    /// </summary>
+    private readonly Queue<PendingLabel> _inFlight = new();
+
     private CancellationTokenSource? _runCts;
     private Task? _runTask;
     private bool _disposed;
+
+    /// <summary>
+    /// 在製品:已掃碼、等著抵達字符檢測站的一張標籤 /
+    /// Work in progress: one label scanned and awaiting the verification station.
+    /// </summary>
+    private sealed record PendingLabel(RecipeModel Recipe, IReadOnlyList<CodeResult> Codes);
 
     public InspectionSequencer(
         IMotorController motor,
@@ -154,6 +188,13 @@ public sealed class InspectionSequencer : IAsyncDisposable
 
         try
         {
+            // 上一輪留下的在製品一律作廢:初始化包含重新對標,而料帶在停機期間多半被人手拉動過,
+            // 佇列裡那些標籤現在究竟停在哪一格已經不可信。
+            // Any work in progress from the previous run is void: initialising includes re-aligning, the
+            // web has almost certainly been pulled by hand while stopped, and where those queued labels
+            // now sit can no longer be trusted.
+            _inFlight.Clear();
+
             Log("連線中 / Connecting devices…");
             await WithTimeoutAsync(
                 $"{_motor.Name} 連線 / connect", _options.ConnectTimeout,
@@ -180,6 +221,19 @@ public sealed class InspectionSequencer : IAsyncDisposable
             var recipe = await _recipes.LoadAsync(cancellationToken).ConfigureAwait(false);
             Log(string.Create(CultureInfo.InvariantCulture,
                 $"配方載入 / Recipe loaded: {recipe.ModelName} ({recipe.ExpectedCodeCount} code(s), {recipe.ExpectedCharacterRegionCount} region(s))"));
+
+            // 兩站相隔格數要說出來。它決定「前幾張標籤只掃碼、不留紀錄」這個現場一定會看到、
+            // 卻最容易被當成程式壞掉的行為。
+            // The station offset is stated out loud. It governs the behaviour the line is certain to
+            // notice and most likely to read as a broken program: the first few labels are scanned and
+            // leave no record.
+            var offset = _options.InspectionOffsetPitches.ToString(CultureInfo.InvariantCulture);
+            Log(_options.InspectionOffsetPitches == 0
+                ? "讀碼與字符檢測同一位置,每張標籤當次判定 / Reading and verification share one position; "
+                    + "each label is judged in its own cycle."
+                : $"檢測站在讀碼站下游 {offset} 格,因此前 {offset} 張標籤只掃碼、尚不會產生紀錄"
+                    + $" / the verification station is {offset} pitches downstream, so the first "
+                    + $"{offset} labels are scanned and produce no record yet.");
 
             TransitionTo(MachineState.Idle, from: MachineState.Initializing);
             Log("待命 / Ready.");
@@ -240,6 +294,10 @@ public sealed class InspectionSequencer : IAsyncDisposable
         }
 
         await SafeStopMotorAsync().ConfigureAwait(false);
+
+        // 產線工作已經結束,此時觸碰佇列是安全的
+        // The line task has finished, so touching the queue here is safe.
+        DiscardInFlight();
 
         // 故障期間收到停機命令時,故障狀態優先保留
         // A fault raised during the stop wins: do not paper over it with Idle.
@@ -339,7 +397,12 @@ public sealed class InspectionSequencer : IAsyncDisposable
     /// Shared by the background loop and the unit tests, so tests exercise the same
     /// code path the line runs.
     /// </summary>
-    public async Task<InspectionRecord> RunCycleAsync(CancellationToken cancellationToken)
+    /// <returns>
+    /// 本週期完成判定的那一張標籤的紀錄；標籤還在兩站之間前進、尚無任何一張可判定時為 null /
+    /// The record for the label judged this cycle, or null while labels are still advancing between
+    /// the two stations and none can be judged yet.
+    /// </returns>
+    public async Task<InspectionRecord?> RunCycleAsync(CancellationToken cancellationToken)
     {
         // 每張標籤都重讀配方：換線後下一張立即生效
         // Re-read the recipe per label, so a changeover takes effect on the very next one.
@@ -350,18 +413,40 @@ public sealed class InspectionSequencer : IAsyncDisposable
             token => _motor.FeedAsync(_options.FeedPitchPulses, _options.FeedSpeedPulsePerSecond, token),
             cancellationToken).ConfigureAwait(false);
 
-        // 兩個感測器都觸發,不因其中一個先判退就略過另一個。
-        // 舊架構在讀碼失敗時略過拍照,省下的是「移動到拍照位」那一趟;
-        // 現在兩者共用同一次進給,沒有行程可省,而少一組結果就少一半的判退依據 ——
-        // 印刷調機時那正是操作員最需要看到的東西。
-        // Both sensors fire; neither is skipped because the other already found a reason
-        // to reject. The old design skipped the capture after a failed read to save the
-        // move to the inspect position — with a single feed serving both sensors there is
-        // no travel left to save, and dropping one result set halves the evidence behind
-        // the reject, which is exactly what an operator dialling in a print job needs.
+        // 讀碼站看的是剛進站的這一張 / The reading station sees the label that just arrived.
+        //
+        // 兩個感測器都要觸發,不因其中一個先判退就略過另一個:少一組結果就少一半的判退依據,
+        // 而印刷調機時那正是操作員最需要看到的東西。
+        // Both sensors fire; neither is skipped because the other already found a reason to reject.
+        // Dropping one result set halves the evidence behind the reject, which is exactly what an
+        // operator dialling in a print job needs.
         var codeResults = await WithTimeoutAsync(
             "讀碼 / code read", _options.CodeReadTimeout,
             _codeReader.TriggerAsync, cancellationToken).ConfigureAwait(false);
+
+        // 連同當時的配方一起推入在製品佇列 / Queue it with the recipe in force at scan time.
+        _inFlight.Enqueue(new PendingLabel(recipe, codeResults));
+
+        // 佇列還沒填滿相隔的格數,代表檢測站底下還沒有任何「已掃碼」的標籤。
+        // 此時刻意不觸發字符檢測:那裡躺著的是開機前就已經越過讀碼站的標籤,
+        // 拍它只會拍到一個無法歸屬的結果,而把無法歸屬的結果寫進追溯資料,
+        // 比完全沒有紀錄糟得多。
+        // The queue has not yet spanned the offset, so no scanned label has reached the verification
+        // station. The verifier is deliberately not triggered: what lies under it passed the reading
+        // station before this run began, and capturing it would produce a result belonging to no
+        // known label — and an unattributable row in the traceability data is far worse than no row.
+        if (_inFlight.Count <= _options.InspectionOffsetPitches)
+        {
+            var filled = _inFlight.Count.ToString(CultureInfo.InvariantCulture);
+            var span = _options.InspectionOffsetPitches.ToString(CultureInfo.InvariantCulture);
+            Log($"標籤前進中,尚未抵達檢測站（{filled}/{span} 格）"
+                + $" / label advancing, not yet at the verification station ({filled}/{span} pitches).");
+            return null;
+        }
+
+        // 檢測站底下的那一張,是相隔格數次進給之前掃到的
+        // The label under the verification station is the one scanned that many feeds ago.
+        var pending = _inFlight.Dequeue();
 
         var characterResults = await WithTimeoutAsync(
             "字符檢測 / character verify", _options.CharacterVerifyTimeout,
@@ -372,7 +457,12 @@ public sealed class InspectionSequencer : IAsyncDisposable
         // DeviceFaultException is deliberately not caught here: it is an equipment-level
         // fault and must propagate to RunLoopAsync and stop the line. A bad label is
         // expressed purely through the result contents, which LabelJudge reads.
-        var rejectReason = LabelJudge.Evaluate(recipe, codeResults, characterResults);
+        //
+        // 判定用的是 pending 裡的配方與讀碼結果,不是本迴圈開頭那個 recipe ——
+        // 兩者在相隔格數大於 0 時屬於不同的標籤。
+        // The verdict uses the recipe and codes held in pending, not the recipe read at the top of this
+        // cycle: with a non-zero offset those belong to two different labels.
+        var rejectReason = LabelJudge.Evaluate(pending.Recipe, pending.Codes, characterResults);
         var judge = rejectReason is null ? Verdict.Pass : Verdict.Fail;
 
         if (rejectReason is not null)
@@ -382,9 +472,9 @@ public sealed class InspectionSequencer : IAsyncDisposable
 
         var record = new InspectionRecord(
             Timestamp: DateTime.UtcNow,
-            ModelName: recipe.ModelName,
+            ModelName: pending.Recipe.ModelName,
             FinalJudge: judge,
-            CodeResults: codeResults,
+            CodeResults: pending.Codes,
             CharacterResults: characterResults,
             RejectReason: rejectReason);
 
@@ -487,7 +577,36 @@ public sealed class InspectionSequencer : IAsyncDisposable
         // threads, and notifying while holding the lock is a deadlock waiting to happen.
         Raise(StateChanged, new StateChangedEventArgs(previous, MachineState.Faulted, reason));
         Log($"故障 / FAULT: {reason}");
+        DiscardInFlight();
         await SafeStopMotorAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 作廢兩站之間的在製品,並說出有幾張 / Void the work in progress between the stations, and say how many.
+    ///
+    /// 不留紀錄的理由與既有規則一致:未完成判定的工件不該留下追溯資料。
+    /// 但「不留紀錄」不等於「不用說」—— 那幾張標籤已經實際越過讀碼站,現在停在兩站之間,
+    /// 它們既沒有被判定,也不會有任何紀錄提到它們存在過。現場必須知道有幾張,才有機會把它們
+    /// 挑出來重驗。少了這一句,它們會安靜地流到下游。
+    /// The no-record rule matches the existing one: a part whose verdict never completed leaves no
+    /// traceability data. But leaving no record is not the same as saying nothing. Those labels did pass
+    /// the reading station and are now sitting between the two, unjudged, with nothing anywhere
+    /// recording that they existed. The line has to be told how many there are to have any chance of
+    /// pulling them for re-inspection; without this line they travel downstream in silence.
+    /// </summary>
+    private void DiscardInFlight()
+    {
+        if (_inFlight.Count == 0)
+        {
+            return;
+        }
+
+        var abandoned = _inFlight.Count.ToString(CultureInfo.InvariantCulture);
+        _inFlight.Clear();
+
+        Log($"兩站之間有 {abandoned} 張標籤已掃碼但未完成檢測,不留紀錄 —— 請自兩站之間取出重驗"
+            + $" / {abandoned} label(s) between the stations were scanned but never verified and leave "
+            + "no record; pull them from between the stations for re-inspection.");
     }
 
     /// <summary>
