@@ -1,76 +1,116 @@
 {
-  // 實機 IV4 設定範例 / Sample real-IV4 settings.
+  // 實機裝置設定範例 / Sample real-device settings.
   //
   // 用法 / How to use:
   // 把本檔複製成執行檔旁的 device.json 並填入現場數值。切換不需要重新編譯。
-  // device.json 存在 → 接實機 IV4；不存在 → 程式拒絕啟動,並顯示它找過的路徑。
+  // device.json 存在 → 依內容接實機；不存在 → 程式拒絕啟動,並顯示它找過的路徑。
   // 不會退回模擬 —— 模擬判定與實機結果在畫面上分不出來,不該由「檔案漏放」觸發。
-  // 沒有感測器而只想看畫面時,以 --mock 啟動（標題列會標示,判定非量測結果）。
+  // 沒有裝置而只想看畫面時,以 --mock 啟動（標題列會標示,判定非量測結果）。
   // Copy this to device.json next to the executable and fill in the line's values; no rebuild.
-  // device.json present → the real IV4; absent → the program refuses to start and shows the
+  // Present → the real devices named here; absent → the program refuses to start and shows the
   // path it searched. It does not fall back to mocks: mock verdicts are indistinguishable from
   // real ones on screen and must not be triggered by a misplaced file. To view the UI with no
-  // sensor, start with --mock (the title bar says so, and the verdicts are not measurements).
+  // devices, start with --mock (the title bar says so, and the verdicts are not measurements).
   //
-  // 怎麼確認設定對不對 / How to confirm these values:
-  // 按一次「單次觸發」，操作訊息區會出現一行「IV4 電文 / frame: ...」，那是感測器送回來的
-  // 原始字串。數一數它的欄位（由 0 起算），再把下面三組索引對上去。
+  // 兩台裝置各自獨立 / The two devices are independent:
+  // CodeReader（SR-X300 讀碼器）必填。
+  // CharacterVerifier（IV4 字符檢測）在還沒導入時「整段刪掉」，不要留一段空的。
+  //   此時配方的字符區域數要設為 0，否則每張標籤都會以「區域數不足」判退。
+  // CodeReader is required. Delete the whole CharacterVerifier section while there is no IV4 yet
+  // rather than leaving an empty one; the recipe's region count must then be 0, or every label
+  // rejects on the region count.
+  //
+  // 怎麼確認欄位索引 / How to confirm the field indexes:
+  // 按一次「單次觸發」，操作訊息區會出現「電文 / frame [裝置名稱]: ...」，那是裝置送回來的
+  // 原始字串。數一數它的欄位（由 0 起算），再把索引對上去。兩台裝置各有自己的一行。
   // 設定錯誤的表徵是「每張標籤都判退」，那與印刷不良、與感測器沒對焦看起來一模一樣，
   // 所以請一定先看電文再調索引，不要憑判定結果猜。
-  // Press Trigger once and the log pane shows "IV4 電文 / frame: ..." — the raw string the
-  // sensor sent. Count its fields (zero-based) and match the three index lists below.
-  // A wrong layout presents as "every label rejects", which looks exactly like bad print and
-  // exactly like a sensor out of focus, so read the frame first rather than guessing from
-  // the verdicts.
+  // Press Trigger once and the log pane shows "電文 / frame [device]: ..." — the raw string the
+  // device sent, one line per device. Count its fields (zero-based) and match the indexes. A wrong
+  // layout presents as "every label rejects", which looks exactly like bad print and exactly like
+  // a sensor out of focus, so read the frame first rather than guessing from the verdicts.
 
-  "Host": "192.168.0.10",
-  "Port": 8500,
+  "CodeReader": {
+    // Keyence SR-X300。設定軟體：AutoID Network Navigator → 乙太網頁籤。
+    // 讀碼器必須設成 TCP 伺服器；設成客戶端的話它不會在任何埠等待，
+    // 症狀是「拒絕連線」且掃不到任何開著的資料埠。
+    // Configured from AutoID Network Navigator, Ethernet tab. The reader has to be a TCP server;
+    // as a client it listens on nothing, and the symptom is a refused connection with no data port
+    // open anywhere.
+    "Host": "192.168.1.10",
 
-  // 觸發命令，不含結束字元。實際命令依 IV4 端設定的通訊規格而定。
-  // Trigger command without its terminator; the actual command follows the IV4's configured
-  // communication spec.
-  "TriggerCommand": "T1",
+    // 埠號在乙太網頁籤的「設定小幫手」或「設定清單」裡，不在 IP 設定那一頁。
+    // 改完記得按「設定傳送」寫進讀碼器，否則實機行為不會變。
+    // The port lives in the Ethernet tab's setup wizard or parameter list, not on the IP page.
+    // Remember to transmit the settings to the reader afterwards or nothing changes on the device.
+    "Port": 9004,
 
-  // CR / Lf / CrLf
-  "Terminator": "Cr",
-  "FieldDelimiter": ",",
+    // 觸發命令，不含結束字元。沒有預設值 —— 請照裝置通訊規格書填，程式無從猜測。
+    // 命令錯誤的表徵是「裝置完全不回應」，與網路不通、與裝置沒開機分不出來。
+    // Trigger command without its terminator. No default: take it from the device's communication
+    // spec, because the program cannot guess. A wrong command presents as "the device never
+    // answers", indistinguishable from a dead link or an unpowered device.
+    "TriggerCommand": "LON",
 
-  "ConnectTimeoutMs": 5000,
-  "ResponseTimeoutMs": 3000,
+    // Cr / Lf / CrLf
+    "Terminator": "Cr",
+    "FieldDelimiter": ",",
 
-  // 以此開頭的電文視為感測器自身異常 → 停線，不會被記成一張不良標籤。
-  // A frame starting with this is a sensor-level fault: stop the line, do not log a bad label.
-  "ErrorPrefix": "ER",
+    "ConnectTimeoutMs": 5000,
 
-  // 視為「該欄位沒有結果」的字樣，不分大小寫。空欄位一律視為沒有結果。
-  // Tokens meaning "no result in this field", case-insensitive. An empty field always counts.
-  "EmptyTokens": ["NG", "NOREAD", "----"],
+    // 要比協調器的讀碼逾時（預設 3 秒）明顯短。兩層逾時同時到期時，
+    // 現場會隨機拿到兩種訊息之一，而只有裝置層那句說得出是哪一台沒回應。
+    // Keep this comfortably shorter than the sequencer's 3-second read timeout: when both expire
+    // together the line gets one of two messages at random, and only the device-level one names
+    // the device that went silent.
+    "ResponseTimeoutMs": 2000,
 
-  // ── 欄位索引（由 0 起算）/ Field indexes, zero-based ──
-  //
-  // 以下數值是「假設」，不是已驗證的事實 —— 請照上面的方法用實機電文校正。
-  // These values are an assumption, not a verified fact. Correct them against a real frame.
-  //
-  // 條碼內容所在欄位。筆數要與配方的 ExpectedCodeCount 一致。
-  // Fields holding decoded code text; the count should match the recipe's ExpectedCodeCount.
-  "CodeDataFields": [1, 3],
+    // 以此開頭的電文視為裝置自身異常 → 停線，不會被記成一張不良標籤。
+    // A frame starting with this is a device-level fault: stop the line, do not log a bad label.
+    "ErrorPrefix": "ER",
 
-  // 條碼等級所在欄位，與 CodeDataFields 逐位對應。
-  // 感測器沒有輸出等級就留成空陣列 []，此時 Grade 為 null，配方的等級檢查自然失效。
-  // Grade fields, paired positionally with CodeDataFields. Leave [] when the sensor emits no
-  // grade: Grade is then null and the recipe's grade check has nothing to compare.
-  "CodeGradeFields": [2, 4],
+    // 視為「該欄位沒有結果」的字樣，不分大小寫。空欄位一律視為沒有結果。
+    // Tokens meaning "no result in this field", case-insensitive. An empty field always counts.
+    "EmptyTokens": ["NG", "NOREAD", "----"],
 
-  // 字符檢測各區域文字所在欄位。筆數要與配方的 ExpectedCharacterRegionCount 一致。
-  // 感測器程式裡沒有 OCR 區域時清成 []，並把配方的 ExpectedCharacterRegionCount 設 0。
-  // 只清這裡而配方仍要求區域數，會以「區域數不足」判退每一張標籤；
-  // 只設配方 0 而這裡仍留著索引，回報回來的區域仍會被逐區判定（那些欄位讀不到就判退）。
-  // 兩邊要一致。
-  // Fields holding each OCR region's text; the count should match the recipe's
-  // ExpectedCharacterRegionCount. Empty this to [] when the sensor program has no OCR region,
-  // and set the recipe's ExpectedCharacterRegionCount to 0. Clearing only this while the recipe
-  // still demands regions rejects every label on the region count; setting only the recipe to 0
-  // while indexes remain here still judges the regions that report, and fields that read as
-  // nothing still reject. Keep the two consistent.
-  "CharacterTextFields": [5, 6]
+    // ── 欄位索引（由 0 起算）/ Field indexes, zero-based ──
+    // 以下數值是「假設」，不是已驗證的事實 —— 請照上面的方法用實機電文校正。
+    // These values are an assumption, not a verified fact. Correct them against a real frame.
+    //
+    // 條碼內容所在欄位。筆數要與配方的 ExpectedCodeCount 一致。
+    // Fields holding decoded code text; the count should match the recipe's ExpectedCodeCount.
+    "CodeDataFields": [1],
+
+    // 條碼等級（讀取餘裕度）所在欄位，與 CodeDataFields 逐位對應。
+    // 讀碼器沒有輸出等級就留成空陣列 []，此時 Grade 為 null，配方的等級檢查自然失效。
+    // Grade fields, paired positionally with CodeDataFields. Leave [] when the reader emits no
+    // grade: Grade is then null and the recipe's grade check has nothing to compare.
+    "CodeGradeFields": [2]
+  },
+
+  // ── 以下這一段在 IV4 導入之前請整段刪除 / Delete this whole section until the IV4 arrives ──
+  "CharacterVerifier": {
+    // Keyence IV4。與讀碼器是不同的裝置，位址、埠、命令、欄位全部各自獨立設定。
+    // 不可與 CodeReader 填同一個位址加埠 —— 那幾乎一定是複製後忘了改，
+    // 而多數工業裝置只接受一條連線，結果會是其中一台在初始化時被拒絕。
+    // A different device from the reader, with its own address, port, command and fields. It must
+    // not share an address and port with CodeReader: that is almost always an unedited copy, and
+    // since most industrial devices accept only one link, one of them is refused at initialise.
+    "Host": "192.168.1.11",
+    "Port": 8500,
+    "TriggerCommand": "T1",
+    "Terminator": "Cr",
+    "FieldDelimiter": ",",
+    "ConnectTimeoutMs": 5000,
+    "ResponseTimeoutMs": 2000,
+    "ErrorPrefix": "ER",
+    "EmptyTokens": ["NG", "NOREAD", "----"],
+
+    // 字符檢測各區域文字所在欄位。筆數要與配方的 ExpectedCharacterRegionCount 一致。
+    // 不可為空 —— 還沒有 IV4 的話請把整個 CharacterVerifier 段落刪掉，而不是留空陣列。
+    // Fields holding each OCR region's text; the count should match the recipe's
+    // ExpectedCharacterRegionCount. It must not be empty: with no IV4 yet, delete the whole
+    // CharacterVerifier section rather than leaving an empty array.
+    "CharacterTextFields": [1, 2]
+  }
 }

@@ -9,10 +9,20 @@ namespace IpcVisionController.App;
 /// 應用程式入口與組裝根 / Entry point and composition root.
 ///
 /// 這裡是全程式唯一決定接哪些裝置的地方,規則只有兩條:
-/// device.json 存在就接實機 IV4；不存在就「拒絕啟動」,而不是退回模擬。
+/// device.json 存在就依其內容接實機；不存在就「拒絕啟動」,而不是退回模擬。
 /// This is the only place that decides which devices are attached, and there are just two
-/// rules: device.json present means the real IV4; absent means the program refuses to start
-/// rather than falling back to mocks.
+/// rules: device.json present means the real devices it names; absent means the program refuses
+/// to start rather than falling back to mocks.
+///
+/// 兩台裝置,各自獨立 / Two devices, independently attached:
+/// CodeReader（SR-X300）是必要的 —— 配方的條碼筆數下限為 1,沒有讀碼器就每張標籤都判退。
+/// CharacterVerifier（IV4）可以缺,那代表這台機器還沒有字符檢測,此時配方的字符區域數要設 0。
+/// 兩台各有 IP、埠、觸發命令與欄位配置,因為它們是不同型號、不同設定軟體、不同時間導入的。
+/// The CodeReader (SR-X300) is required: the recipe's code count has a floor of one, so without a
+/// reader every label rejects. The CharacterVerifier (IV4) may be absent, meaning this machine has
+/// no character verification yet and the recipe's region count must be zero. Each device carries
+/// its own address, port, command and field layout, because they are different models with
+/// different setup software, commissioned at different times.
 ///
 /// 為什麼「找不到設定檔」不再自動跑模擬 /
 /// Why a missing settings file no longer silently mocks:
@@ -87,14 +97,14 @@ internal static class Program
         // 前者一定是打錯了,不該被當成「這台機器要跑模擬」。
         // A broken settings file stops the program outright: bad contents and no file at all are
         // different things, and the former is always a typo rather than a decision to mock.
-        var deviceOptions = Iv4Options.LoadAsync(DevicePath).GetAwaiter().GetResult();
+        var settings = DeviceSettings.LoadAsync(DevicePath).GetAwaiter().GetResult();
         var mockRequested = args.Contains(MockArgument, StringComparer.OrdinalIgnoreCase);
 
         // 沒有設定檔又沒有明示模擬 —— 拒絕啟動。
         // 這裡刻意不「開起來但停在離線狀態」:畫面開著就會有人按下去,而按下去就會產生紀錄。
         // No settings file and no explicit request: refuse. Deliberately not "open but sit
         // offline" — an open window gets pressed, and pressing it produces records.
-        if (deviceOptions is null && !mockRequested)
+        if (settings is null && !mockRequested)
         {
             RefuseToStart();
             return;
@@ -106,23 +116,22 @@ internal static class Program
         // Real hardware wins when both are present, but not silently. Real-wins keeps a
         // leftover --mock shortcut on the line's desktop harmless; announcing it avoids
         // silently ignoring an explicit argument, which is the very behaviour being removed.
-        if (deviceOptions is not null && mockRequested)
+        if (settings is not null && mockRequested)
         {
             MessageBox.Show(
-                $"{MockArgument} 已忽略：{DevicePath} 存在,將以實機 IV4 啟動。{Environment.NewLine}"
+                $"{MockArgument} 已忽略：{DevicePath} 存在,將以實機裝置啟動。{Environment.NewLine}"
                 + $"要跑模擬請先移走該檔案。{Environment.NewLine}{Environment.NewLine}"
-                + $"{MockArgument} ignored: {DevicePath} exists, so the real IV4 is used. "
+                + $"{MockArgument} ignored: {DevicePath} exists, so the real devices are used. "
                 + "Move that file aside to run on mocks.",
                 "IPC Vision Controller",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
         }
 
-        Iv4VisionSensor? sensor = null;
         ICodeReader codeReader;
         ICharacterVerifier verifier;
 
-        if (deviceOptions is null)
+        if (settings is null)
         {
             // 明示要求的模擬裝置：固定種子讓畫面上的良率序列可重現
             // Mocks, explicitly asked for: fixed seeds make the on-screen sequence reproducible.
@@ -131,33 +140,40 @@ internal static class Program
         }
         else
         {
-            // 同一顆感測器、同一條連線、一次觸發供兩個角色使用
-            // One sensor, one link, one trigger serving both roles.
-            sensor = new Iv4VisionSensor(deviceOptions);
-            codeReader = sensor;
-            verifier = sensor;
+            // 兩台獨立裝置,各自一條連線 / Two independent devices, one link each.
+            codeReader = new SrX300CodeReader(settings.CodeReader!);
+
+            // 沒有 CharacterVerifier 這一段就是「還沒接 IV4」。用一個明確表示不存在的實作,
+            // 而不是讓 verifier 可以是 null —— 後者會在檢測週期裡撒一堆 null 檢查,
+            // 漏掉任何一個的後果是「字符檢測被跳過但紀錄看起來完整」。
+            // No CharacterVerifier section means the IV4 is not attached yet. An implementation
+            // that explicitly means "absent" beats letting verifier be null, which would scatter
+            // null checks through the cycle where missing one yields "verification skipped but the
+            // record looks complete".
+            verifier = settings.CharacterVerifier is null
+                ? new AbsentCharacterVerifier()
+                : new Iv4CharacterVerifier(settings.CharacterVerifier);
         }
+
+        var devices = new DeviceSet(motor, codeReader, verifier, AreMocks: settings is null);
 
         var database = new DatabaseManager(Path.Combine(dataDirectory, DatabaseFileName));
         var recipes = new RecipeManager(Path.Combine(baseDirectory, RecipeFileName));
 
-        var sequencer = new InspectionSequencer(motor, codeReader, verifier, database, recipes);
+        var sequencer = new InspectionSequencer(
+            devices.Motor, devices.CodeReader, devices.Verifier, database, recipes);
 
         // 裝置與資料庫由此處擁有,故在此處處置；Sequencer 只處置自己的權杖來源。
-        // 實機時 codeReader 與 verifier 是同一個物件,會被處置兩次 ——
-        // Iv4VisionSensor.DisposeAsync 為此做成冪等。
-        // The devices and database are owned here, so they are disposed here; the
-        // sequencer disposes only its own token source. On real hardware codeReader and
-        // verifier are the same object and get disposed twice, which is why
-        // Iv4VisionSensor.DisposeAsync is idempotent.
+        // The devices and database are owned here, so they are disposed here; the sequencer
+        // disposes only its own token source.
         try
         {
-            using var form = new MainForm(sequencer, recipes, motor, database, sensor);
+            using var form = new MainForm(sequencer, recipes, database, devices);
             Application.Run(form);
         }
         finally
         {
-            DisposeAllAsync(sequencer, motor, codeReader, verifier, database).GetAwaiter().GetResult();
+            DisposeAllAsync(sequencer, [.. devices.All, database]).GetAwaiter().GetResult();
         }
     }
 

@@ -32,7 +32,7 @@ internal sealed class MainForm : Form
     private readonly RecipeManager _recipes;
     private readonly IMotorController _motor;
     private readonly DatabaseManager _database;
-    private readonly Iv4VisionSensor? _sensor;
+    private readonly DeviceSet _devices;
 
     private readonly Button _initializeButton = new() { Text = "初始化 Initialize", Width = 150, Height = 40 };
     private readonly Button _startButton = new() { Text = "開始 Start", Width = 120, Height = 40, Enabled = false };
@@ -123,24 +123,25 @@ internal sealed class MainForm : Form
     private int _passCount;
     private int _failCount;
 
-    /// <param name="sensor">
-    /// 實機 IV4；跑模擬裝置時為 null / The real IV4, or null when running on mocks.
-    /// 只用來把原始電文顯示在操作訊息區 —— 導入期間確認欄位索引的唯一依據。
-    /// Used only to surface raw frames in the log pane, which is the only thing that
-    /// confirms the configured field indexes during commissioning.
+    /// <param name="devices">
+    /// 這次執行接上的裝置 / The devices this run attached.
+    /// 畫面需要它來做兩件事：宣告模擬或實機,以及逐台顯示原始電文與生效的欄位配置。
+    /// 電文一定要標明來源 —— 讀碼器與字符檢測器的電文長得很像,索引卻是各自獨立設定的。
+    /// The UI needs it for two things: declaring mock versus live, and showing each device's raw
+    /// frames alongside the field layout in force. Frames always name their device, because the
+    /// reader's and the verifier's look alike while their indexes are configured independently.
     /// </param>
     public MainForm(
         InspectionSequencer sequencer,
         RecipeManager recipes,
-        IMotorController motor,
         DatabaseManager database,
-        Iv4VisionSensor? sensor = null)
+        DeviceSet devices)
     {
         _sequencer = sequencer ?? throw new ArgumentNullException(nameof(sequencer));
         _recipes = recipes ?? throw new ArgumentNullException(nameof(recipes));
-        _motor = motor ?? throw new ArgumentNullException(nameof(motor));
         _database = database ?? throw new ArgumentNullException(nameof(database));
-        _sensor = sensor;
+        _devices = devices ?? throw new ArgumentNullException(nameof(devices));
+        _motor = devices.Motor;
 
         // 標題在此設定而非 OnShown：標題列是模擬/實機唯一永遠可見的標示,
         // 不該有任何一瞬間顯示未標示的標題。Form.Text 在句柄建立前指派是安全的。
@@ -170,9 +171,9 @@ internal sealed class MainForm : Form
     /// marking the mode permits mock data to be signed off as a shipping record. The mark lives
     /// in the title bar as the one place always on screen that also survives a screenshot.
     /// </summary>
-    private string DeviceModeTitle() => _sensor is null
+    private string DeviceModeTitle() => _devices.AreMocks
         ? $"{BaseTitle} — 【模擬資料 MOCK DATA】非出貨依據 / not a shipping record"
-        : $"{BaseTitle} — 實機 / LIVE {_sensor.Name}";
+        : $"{BaseTitle} — 實機 / LIVE {_devices.CodeReader.Name}";
 
     /// <summary>
     /// 把模擬/實機的來由寫進操作訊息區 / Record why this is mock or live in the log pane.
@@ -186,7 +187,7 @@ internal sealed class MainForm : Form
     /// </summary>
     private void AppendDeviceModeLog()
     {
-        if (_sensor is null)
+        if (_devices.AreMocks)
         {
             AppendLog("模擬模式 / MOCK MODE（以 --mock 啟動 / started with --mock）");
             AppendLog("判定來自固定種子的產生器,與任何實際標籤無關,不可作為出貨依據,");
@@ -199,12 +200,34 @@ internal sealed class MainForm : Form
             return;
         }
 
-        AppendLog($"實機模式 / LIVE MODE: {_sensor.Name}");
-        AppendLog($"欄位配置 / field layout: {_sensor.Configuration}");
+        AppendLog("實機模式 / LIVE MODE");
+        AppendLog($"讀碼 / code read: {_devices.CodeReader.Name}");
+        AppendLog($"字符檢測 / character verify: {_devices.Verifier.Name}");
+
+        // 每台裝置各印一行生效的欄位配置。兩台是各自獨立設定的,
+        // 只印其中一台會讓另一台的索引錯誤完全無跡可循。
+        // One line of live field layout per device. The two are configured independently, and
+        // printing only one leaves a wrong index on the other with no trace at all.
+        foreach (var source in _devices.FrameSources)
+        {
+            AppendLog($"欄位配置 / field layout: {source.Configuration}");
+        }
+
+        // 字符檢測未導入時要明說,並指出配方該怎麼配合 ——
+        // 否則配方仍要求區域數,而現場會看到每張標籤都以「區域數不足」判退。
+        // Say so explicitly when verification is not installed, and say what the recipe must do to
+        // match: otherwise the recipe still demands regions and every label rejects on the count.
+        if (_devices.Verifier is AbsentCharacterVerifier)
+        {
+            AppendLog("尚未導入字符檢測,配方的字符區域數請設為 0,否則每張標籤都會以「區域數不足」判退。");
+            AppendLog("No character verification installed: set the recipe's region count to 0, or "
+                + "every label rejects on the region count.");
+        }
+
         AppendLog("欄位索引未經實機電文核對前,判定結果不足以採信 —— 請先按單次觸發,"
-            + "對照隨後出現的「IV4 電文」數欄位。");
+            + "對照隨後出現的「電文」行逐格數過去。");
         AppendLog("Until the field indexes are checked against a real frame the verdicts cannot be "
-            + "trusted: press Trigger once and count the fields in the IV4 frame line that follows.");
+            + "trusted: press Trigger once and count the fields in the frame lines that follow.");
     }
 
     /// <summary>
@@ -340,9 +363,9 @@ internal sealed class MainForm : Form
         _sequencer.CycleCompleted += OnCycleCompleted;
         _sequencer.LogEmitted += OnLogEmitted;
 
-        if (_sensor is not null)
+        foreach (var source in _devices.FrameSources)
         {
-            _sensor.RawFrameReceived += OnRawFrameReceived;
+            source.RawFrameReceived += OnRawFrameReceived;
         }
 
         _refreshTimer.Interval = (int)RefreshPeriod.TotalMilliseconds;
@@ -517,15 +540,17 @@ internal sealed class MainForm : Form
     private void OnLogEmitted(object? sender, SequencerLogEventArgs e) => RunOnUi(() => AppendLog(e.Message));
 
     /// <summary>
-    /// 顯示 IV4 的原始電文 / Show the IV4's raw frame.
+    /// 顯示裝置的原始電文 / Show a device's raw frame.
     /// 導入期間唯一能確認 device.json 欄位索引是否正確的依據。少了它,設定錯誤的表徵
     /// 是「每張標籤都判退」—— 與印刷不良、與感測器沒對焦完全分不出來。
-    /// The only thing that confirms whether device.json's field indexes are right. Without
-    /// it a misconfiguration presents as "every label rejects", indistinguishable from bad
-    /// print and from a sensor out of focus.
+    /// 一定要標明來源:兩台裝置的電文格式各自獨立設定,混在一起就無法對照。
+    /// The only thing that confirms whether device.json's field indexes are right. Without it a
+    /// misconfiguration presents as "every label rejects", indistinguishable from bad print and
+    /// from a sensor out of focus. The device is always named: the two frame layouts are
+    /// configured independently and cannot be checked against each other once mixed.
     /// </summary>
-    private void OnRawFrameReceived(object? sender, Iv4RawFrameEventArgs e) =>
-        RunOnUi(() => AppendLog($"IV4 電文 / frame: {e.Frame}"));
+    private void OnRawFrameReceived(object? sender, RawFrameEventArgs e) =>
+        RunOnUi(() => AppendLog($"電文 / frame [{e.DeviceName}]: {e.Frame}"));
 
     private void OnRefreshTick(object? sender, EventArgs e)
     {
