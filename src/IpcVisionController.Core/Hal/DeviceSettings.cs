@@ -34,6 +34,26 @@ public sealed class DeviceSettings
     public Iv4Options? CharacterVerifier { get; set; }
 
     /// <summary>
+    /// 讀碼站到字符檢測站相隔幾格 / Pitches from the code-reading station to the verification station.
+    ///
+    /// 為什麼這個機構參數放在 device.json /
+    /// Why this mechanical value lives in device.json:
+    /// 它描述的正是「這兩台裝置裝得多遠」—— 是兩台裝置之間的物理關係,而這個檔案就是在描述
+    /// 這台機器接了哪些裝置。放在配方裡會被換線改掉,而它與機種無關;
+    /// 寫死在程式裡則要為了一個安裝距離重新發佈,而現場沒有 SDK。
+    /// It describes how far apart these two devices are mounted — a physical relationship between them,
+    /// and this file is what describes which devices this machine has. In the recipe it would be
+    /// clobbered at a changeover despite having nothing to do with the product; in code it would mean a
+    /// redeploy for a mounting distance, and the line has no SDK.
+    ///
+    /// 值由 <see cref="Machine.SequencerOptions.Validate"/> 把關,不在此重複驗證 ——
+    /// 同一條規則寫兩次,遲早會有一邊被改到而另一邊沒有。
+    /// The value is policed by the sequencer's own validation rather than checked again here: one rule
+    /// written twice eventually has one side edited and the other left behind.
+    /// </summary>
+    public int InspectionOffsetPitches { get; set; }
+
+    /// <summary>
     /// 驗證整份設定 / Validate the whole file.
     /// </summary>
     /// <exception cref="ArgumentException">設定不可用 / A value is unusable.</exception>

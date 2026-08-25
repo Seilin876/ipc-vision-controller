@@ -30,6 +30,29 @@
   // layout presents as "every label rejects", which looks exactly like bad print and exactly like
   // a sensor out of focus, so read the frame first rather than guessing from the verdicts.
 
+  // ── 兩站相隔幾格 / Pitches between the two stations ──
+  //
+  // 讀碼站到字符檢測站之間，標籤要前進幾格。機構是「先 SR-X300 掃碼，再前進、再觸發 IV4」，
+  // 所以正常值為正；兩台瞄同一個位置時填 0。
+  // How many pitches a label advances from the reading station to the verification station. The
+  // mechanism scans on the SR-X300, advances, then triggers the IV4, so the normal value is positive;
+  // use 0 when both sensors look at the same position.
+  //
+  // 填錯的後果不是「跑不動」，而是追溯紀錄把讀碼站看到的第 N 張與檢測站看到的第 N−k 張
+  // 湊成一筆 —— 不會報錯、良率正常、每一筆看起來都完整，但兩半不屬於同一張標籤。
+  // 這是這支程式能造成的最嚴重錯誤，請務必照實際機構填。
+  // A wrong value does not stop the machine: it pairs the reading station's label N with the
+  // verification station's label N−k in one record. Nothing errors, the yield looks normal and every
+  // row looks complete, while the two halves belong to different labels. This is the worst thing this
+  // program can do, so set it from the actual mechanism.
+  //
+  // 現場會看到的行為：初始化後前 k 次觸發只掃碼、不產生紀錄，訊息區顯示「標籤前進中」，
+  // 第 k+1 次才出現第一筆判定。停機時兩站之間那 k 張會被作廢並在訊息區報出張數。
+  // What the line sees: after initialising, the first k triggers only scan and produce no record, the
+  // log says the label is advancing, and the first verdict appears on trigger k+1. On a stop the k
+  // labels between the stations are voided and their count is reported in the log.
+  "InspectionOffsetPitches": 4,
+
   "CodeReader": {
     // Keyence SR-X300。設定軟體：AutoID Network Navigator → 乙太網頁籤。
     // 讀碼器必須設成 TCP 伺服器；設成客戶端的話它不會在任何埠等待，

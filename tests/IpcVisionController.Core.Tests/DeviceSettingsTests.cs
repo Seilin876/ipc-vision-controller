@@ -262,6 +262,61 @@ public sealed class DeviceSettingsTests : IDisposable
     }
 
     [Fact]
+    public async Task LoadAsync_CarriesTheStationOffset()
+    {
+        // 這個值決定追溯紀錄把哪一張的條碼配哪一張的字符。它必須來自設定檔 ——
+        // 留成預設值 0 的話,相隔數格的機構會安靜地產出「兩半不屬於同一張標籤」的紀錄,
+        // 而那不會報錯、良率也正常。
+        // This value decides which label's code is paired with which label's characters. It has to come
+        // from the file: left at the default of zero, a mechanism with stations several pitches apart
+        // quietly produces records whose two halves belong to different labels, without erroring and
+        // with a normal-looking yield.
+        var path = Path.Combine(_workspace.Root, "device.json");
+        await File.WriteAllTextAsync(path, """
+            {
+              "InspectionOffsetPitches": 4,
+              "CodeReader": {
+                "Host": "192.168.1.10",
+                "Port": 9004,
+                "TriggerCommand": "LON",
+                "CodeDataFields": [1]
+              }
+            }
+            """);
+
+        var settings = await DeviceSettings.LoadAsync(path);
+
+        Assert.NotNull(settings);
+        Assert.Equal(4, settings.InspectionOffsetPitches);
+    }
+
+    [Fact]
+    public async Task LoadAsync_WithNoStationOffset_DefaultsToBothSensorsOnOneLabel()
+    {
+        // 省略時視為 0。這是唯一安全的預設:0 的行為與「兩台瞄同一位置」完全一致,
+        // 而猜一個正數會讓沒有相隔的機構前幾張標籤憑空消失。
+        // Omitted means zero, the only safe default: it behaves exactly as both sensors sharing one
+        // position, whereas guessing a positive value would make the first few labels of a machine with
+        // no offset vanish for no reason.
+        var path = Path.Combine(_workspace.Root, "device.json");
+        await File.WriteAllTextAsync(path, """
+            {
+              "CodeReader": {
+                "Host": "192.168.1.10",
+                "Port": 9004,
+                "TriggerCommand": "LON",
+                "CodeDataFields": [1]
+              }
+            }
+            """);
+
+        var settings = await DeviceSettings.LoadAsync(path);
+
+        Assert.NotNull(settings);
+        Assert.Equal(0, settings.InspectionOffsetPitches);
+    }
+
+    [Fact]
     public async Task LoadAsync_WithAnUnusableFile_ThrowsRatherThanRunningOnDefaults()
     {
         var path = Path.Combine(_workspace.Root, "device.json");

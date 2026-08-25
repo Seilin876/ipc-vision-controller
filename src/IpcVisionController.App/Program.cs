@@ -222,8 +222,22 @@ internal static class Program
         var database = new DatabaseManager(Path.Combine(dataDirectory, DatabaseFileName));
         var recipes = new RecipeManager(Path.Combine(baseDirectory, RecipeFileName));
 
+        // 兩站相隔格數來自 device.json —— 它描述的是這兩台裝置裝得多遠。
+        // 模擬模式沒有裝置也就沒有站別,一律 0（兩台看同一張)。
+        // 這個值錯掉的後果不是「跑不動」,而是追溯紀錄把不同標籤的兩半湊在一起 ——
+        // 所以它必須來自設定檔而不是預設值,現場才有機會填對。
+        // The station offset comes from device.json, which is what describes how far apart these two
+        // devices are mounted. On mocks there are no stations, so it is zero — both sensors on one label.
+        // A wrong value here does not stop the machine; it pairs halves of different labels in the
+        // traceability record, which is why it has to come from the settings file rather than a default
+        // the line never sees.
+        var sequencerOptions = new SequencerOptions
+        {
+            InspectionOffsetPitches = settings?.InspectionOffsetPitches ?? 0,
+        };
+
         var sequencer = new InspectionSequencer(
-            devices.Motor, devices.CodeReader, devices.Verifier, database, recipes);
+            devices.Motor, devices.CodeReader, devices.Verifier, database, recipes, sequencerOptions);
 
         return new Composition(sequencer, recipes, database, devices);
     }
