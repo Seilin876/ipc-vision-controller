@@ -221,27 +221,40 @@ public sealed class NonProtocolSensorTests
     }
 
     [Fact]
-    public async Task ConnectAsync_WhenNothingIsListening_SaysThePortIsClosed()
+    public async Task ConnectAsync_WhenNothingIsListening_RaisesADeviceFaultNamingTheDevice()
     {
-        // 「拒絕連線」與「逾時」是兩件不同的事:拒絕代表位址可達而該埠沒有人在聽,
-        // 通常是埠號錯、無協定通訊沒啟用,或設定軟體正佔著唯一的連線。
-        // 訊息若把兩者混為一談,現場會從錯的一端開始查。
-        // Refused and timed out are different: refused means the address answered and nothing is
-        // listening on that port — usually the wrong port, non-protocol communication left disabled,
-        // or setup software holding the only link. A message that conflates them starts the
-        // diagnosis at the wrong end.
+        // 這裡刻意只斷言「拋出設備故障,而且訊息指名是哪一台」。
+        // 作業系統對「連到已關閉的 loopback 埠」並不一致:macOS 立刻回 RST(拒絕連線),
+        // Windows 對剛釋放的埠是丟棄 SYN,於是走到逾時。兩者都是正確的失敗,
+        // 而把其中一種寫進斷言,測到的是平台行為而不是本程式的行為。
+        // 錯誤碼到現場語彙的翻譯由 ConnectFailureHintTests 逐碼驗證,不必經過 socket。
+        // This deliberately asserts only that a device fault is raised and that it names the device.
+        // Operating systems disagree about connecting to a closed loopback port: macOS sends an
+        // immediate RST (refused) while Windows drops the SYN on a just-released port and the attempt
+        // times out. Both are correct failures, and pinning either one into an assertion tests the
+        // platform rather than this program. The mapping from error code to the line's vocabulary is
+        // verified code by code in ConnectFailureHintTests, without a socket.
         int closedPort;
         await using (var server = new FakeNonProtocolServer(_ => ["OK"]))
         {
             closedPort = server.Port;
         }
 
-        await using var reader = new SrX300CodeReader(ReaderOptions(closedPort));
+        // 連線逾時壓到 300 ms：在會走到逾時的平台上,預設的 2 秒只是讓整份測試變慢
+        // The connect timeout is cut to 300 ms: on platforms that take the timeout path, the default
+        // two seconds only makes the suite slower.
+        var options = ReaderOptions(closedPort);
+        options.ConnectTimeoutMs = 300;
+
+        await using var reader = new SrX300CodeReader(options);
 
         var error = await Assert.ThrowsAsync<DeviceFaultException>(
             () => reader.ConnectAsync(CancellationToken.None));
 
-        Assert.Contains("沒有人在聽", error.Message, StringComparison.Ordinal);
+        Assert.Contains("SR-X300", error.Message, StringComparison.Ordinal);
+        Assert.Contains(closedPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            error.Message, StringComparison.Ordinal);
+        Assert.False(reader.IsConnected);
     }
 
     // ── 導入用的原始電文 / Raw frames for commissioning ──────────────────────

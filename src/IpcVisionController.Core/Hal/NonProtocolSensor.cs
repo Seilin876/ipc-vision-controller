@@ -88,21 +88,14 @@ public abstract class NonProtocolSensor : IDevice, IRawFrameSource
             {
                 client.Dispose();
 
-                // 「拒絕連線」與「逾時」是兩件完全不同的事,值得分開講:
-                // 拒絕代表位址是通的而該埠沒有人在聽 —— 通常是埠號錯、無協定通訊沒啟用,
-                // 或裝置只接受一條連線而設定軟體正佔著。
-                // Refused and timed out are quite different and worth saying separately: refused
-                // means the address answered and nothing is listening on that port — usually the
-                // wrong port, non-protocol communication left disabled, or a single-connection
-                // device with its setup software still attached.
-                var hint = ex.SocketErrorCode == SocketError.ConnectionRefused
-                    ? " 位址可達但該埠沒有人在聽：確認埠號、確認裝置端已啟用無協定通訊、"
-                        + "並關閉正佔著連線的設定軟體 / the address answered but nothing is listening on "
-                        + "that port: check the port, check that non-protocol communication is enabled, "
-                        + "and close any setup software holding the link."
-                    : string.Empty;
-
-                throw new DeviceFaultException($"{Name} 連線失敗 / connect failed: {ex.Message}{hint}");
+                // 錯誤碼已經指出原因,只是用的是 socket 的語彙 —— 翻成產線的語彙見
+                // ConnectFailureHint,那裡逐碼說明,也逐碼可測。
+                // The error code already names the cause, only in the vocabulary of sockets. The
+                // translation into the line's vocabulary lives in ConnectFailureHint, documented and
+                // tested code by code.
+                throw new DeviceFaultException(
+                    $"{Name} 連線失敗 / connect failed: {ex.Message}"
+                    + ConnectFailureHint.For(ex.SocketErrorCode));
             }
             catch
             {
