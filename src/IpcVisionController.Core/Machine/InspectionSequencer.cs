@@ -130,6 +130,14 @@ public sealed class InspectionSequencer : IAsyncDisposable
     private bool _disposed;
 
     /// <summary>
+    /// 目前佇列是按哪個格數排進去的 / The pitch count the queue was filled against.
+    /// null 表示還沒跑過任何週期。格數改變時佇列必須作廢,否則會從錯的位置取出標籤。
+    /// Null before any cycle has run. When the count changes the queue must be voided, or labels come out of
+    /// the wrong position.
+    /// </summary>
+    private int? _offsetPitchesInForce;
+
+    /// <summary>
     /// 在製品:已掃碼、等著抵達字符檢測站的一張標籤 /
     /// Work in progress: one label scanned and awaiting the verification station.
     /// </summary>
@@ -194,6 +202,7 @@ public sealed class InspectionSequencer : IAsyncDisposable
             // web has almost certainly been pulled by hand while stopped, and where those queued labels
             // now sit can no longer be trusted.
             _inFlight.Clear();
+            _offsetPitchesInForce = null;
 
             Log("連線中 / Connecting devices…");
             await WithTimeoutAsync(
@@ -222,18 +231,57 @@ public sealed class InspectionSequencer : IAsyncDisposable
             Log(string.Create(CultureInfo.InvariantCulture,
                 $"配方載入 / Recipe loaded: {recipe.ModelName} ({recipe.ExpectedCodeCount} code(s), {recipe.ExpectedCharacterRegionCount} region(s))"));
 
-            // 兩站相隔格數要說出來。它決定「前幾張標籤只掃碼、不留紀錄」這個現場一定會看到、
-            // 卻最容易被當成程式壞掉的行為。
-            // The station offset is stated out loud. It governs the behaviour the line is certain to
-            // notice and most likely to read as a broken program: the first few labels are scanned and
-            // leave no record.
-            var offset = _options.InspectionOffsetPitches.ToString(CultureInfo.InvariantCulture);
-            Log(_options.InspectionOffsetPitches == 0
-                ? "讀碼與字符檢測同一位置,每張標籤當次判定 / Reading and verification share one position; "
-                    + "each label is judged in its own cycle."
-                : $"檢測站在讀碼站下游 {offset} 格,因此前 {offset} 張標籤只掃碼、尚不會產生紀錄"
-                    + $" / the verification station is {offset} pitches downstream, so the first "
-                    + $"{offset} labels are scanned and produce no record yet.");
+            // 相隔格數由「機構距離 ÷ 配方一格脈波數」推算,兩個數字都要印出來 ——
+            // 只印結果的話,現場無從判斷是距離填錯還是一格脈波數填錯。
+            // 格數決定「前幾張標籤只掃碼、不留紀錄」這個現場一定會看到、
+            // 卻最容易被當成程式壞掉的行為,所以它必須說出來。
+            // The pitch count is derived from the mechanical distance over the recipe's pulses per feed, and
+            // both numbers are printed: with only the result, the line cannot tell a wrong distance from a
+            // wrong pitch. The count governs the behaviour the line is certain to notice and most likely to
+            // read as a broken program — the first few labels scanned without a record — so it is stated.
+            var offsetPitches = _options.OffsetPitchesFor(recipe.FeedPitchPulses);
+
+            if (offsetPitches > SequencerOptions.MaxInspectionOffsetPitches)
+            {
+                throw new InvalidOperationException(
+                    $"檢測站距離 {_options.InspectionStationDistancePulses.ToString(CultureInfo.InvariantCulture)}"
+                    + $" 脈波 ÷ 一格 {recipe.FeedPitchPulses.ToString(CultureInfo.InvariantCulture)} 脈波 = "
+                    + $"{offsetPitches.ToString(CultureInfo.InvariantCulture)} 格,超過上限 "
+                    + $"{SequencerOptions.MaxInspectionOffsetPitches.ToString(CultureInfo.InvariantCulture)}"
+                    + " —— 兩個數字之一應為誤植 / station distance over pulses per feed exceeds the sanity "
+                    + "cap; one of the two numbers is a typo.");
+            }
+
+            if (offsetPitches == 0)
+            {
+                Log("讀碼與字符檢測同一位置,每張標籤當次判定 / Reading and verification share one position; "
+                    + "each label is judged in its own cycle.");
+            }
+            else
+            {
+                var distance = _options.InspectionStationDistancePulses.ToString(CultureInfo.InvariantCulture);
+                var pitch = recipe.FeedPitchPulses.ToString(CultureInfo.InvariantCulture);
+                var pitches = offsetPitches.ToString(CultureInfo.InvariantCulture);
+
+                Log($"檢測站距離 {distance} 脈波 ÷ 一格 {pitch} 脈波 = 下游 {pitches} 格,"
+                    + $"因此前 {pitches} 張標籤只掃碼、尚不會產生紀錄 / station distance over pulses per "
+                    + $"feed gives {pitches} pitches downstream, so the first {pitches} labels are scanned "
+                    + "and produce no record yet.");
+
+                // 除不盡代表感測器沒有落在標籤邊界上 —— 那個位置每一格都不一樣,不可重現。
+                // 程式仍取最接近的一格讓機台跑得起來,但這件事必須說出來,
+                // 否則判定會時好時壞,而現場只會看到「偶發判退」。
+                // A remainder means the sensor does not sit on a label boundary: that position differs every
+                // pitch and does not repeat. The nearest whole pitch is still used so the machine runs, but
+                // it has to be said, or the verdicts come and go and the line sees only intermittent rejects.
+                if (!_options.DistanceDividesEvenlyBy(recipe.FeedPitchPulses))
+                {
+                    Log($"注意：{distance} 不是 {pitch} 的整數倍,感測器未落在標籤邊界上,已取最接近的格數"
+                        + " —— 請確認機構距離與一格脈波數 / the distance is not a whole multiple of one "
+                        + "pitch, so the sensor does not sit on a label boundary and the nearest count was "
+                        + "used; check both numbers.");
+                }
+            }
 
             TransitionTo(MachineState.Idle, from: MachineState.Initializing);
             Log("待命 / Ready.");
@@ -408,9 +456,31 @@ public sealed class InspectionSequencer : IAsyncDisposable
         // Re-read the recipe per label, so a changeover takes effect on the very next one.
         var recipe = _recipes.Current;
 
+        // 格數隨配方而變（距離固定,一格的長度換機種就不同),所以每個週期重算。
+        // 換線改變了格數而佇列裡還有在製品時,那些標籤是按舊格數排進去的 —— 沿用新格數去取,
+        // 會取到錯的那一張。它們屬於舊機種,本來就不該用新規格判定,一律作廢。
+        // The pitch count follows the recipe, since the distance is fixed while a pitch's length changes with
+        // the product, so it is recomputed each cycle. When a changeover alters it while labels are still in
+        // the queue, those were queued against the old count and reading with the new one takes the wrong
+        // label. They belong to the outgoing product and were never to be judged by the incoming
+        // specification, so they are voided.
+        var offsetPitches = _options.OffsetPitchesFor(recipe.FeedPitchPulses);
+
+        if (_offsetPitchesInForce is int inForce && inForce != offsetPitches && _inFlight.Count > 0)
+        {
+            var was = inForce.ToString(CultureInfo.InvariantCulture);
+            var now = offsetPitches.ToString(CultureInfo.InvariantCulture);
+
+            Log($"相隔格數由 {was} 改為 {now}（換線),兩站之間的在製品作廢 / the station offset changed from "
+                + $"{was} to {now} at a changeover; work in progress between the stations is void.");
+            DiscardInFlight();
+        }
+
+        _offsetPitchesInForce = offsetPitches;
+
         await WithTimeoutAsync(
             "進給一格 / feed one pitch", _options.FeedTimeout,
-            token => _motor.FeedAsync(_options.FeedPitchPulses, _options.FeedSpeedPulsePerSecond, token),
+            token => _motor.FeedAsync(recipe.FeedPitchPulses, _options.FeedSpeedPulsePerSecond, token),
             cancellationToken).ConfigureAwait(false);
 
         // 讀碼站看的是剛進站的這一張 / The reading station sees the label that just arrived.
@@ -435,10 +505,10 @@ public sealed class InspectionSequencer : IAsyncDisposable
         // station. The verifier is deliberately not triggered: what lies under it passed the reading
         // station before this run began, and capturing it would produce a result belonging to no
         // known label — and an unattributable row in the traceability data is far worse than no row.
-        if (_inFlight.Count <= _options.InspectionOffsetPitches)
+        if (_inFlight.Count <= offsetPitches)
         {
             var filled = _inFlight.Count.ToString(CultureInfo.InvariantCulture);
-            var span = _options.InspectionOffsetPitches.ToString(CultureInfo.InvariantCulture);
+            var span = offsetPitches.ToString(CultureInfo.InvariantCulture);
             Log($"標籤前進中,尚未抵達檢測站（{filled}/{span} 格）"
                 + $" / label advancing, not yet at the verification station ({filled}/{span} pitches).");
             return null;

@@ -110,6 +110,35 @@ internal sealed class MainForm : Form
     /// rejects on the region count.
     /// </summary>
     private readonly NumericUpDown _regionCountBox = new() { Minimum = 0, Maximum = 10, Value = 1, Width = 60 };
+
+    /// <summary>
+    /// 一次進給的脈波數 / Pulses commanded for one feed.
+    ///
+    /// 為什麼放在配方面板而不是設定檔 / Why this sits in the recipe panel rather than a file:
+    /// 一次進給要走「視野裡那幾張標籤」的距離,而標籤長度隨機種變 —— 所以它是換線要調的值,
+    /// 而換線是在這個畫面上做的。寫在設定檔裡就得為了換一個機種去改檔案、重開程式。
+    /// One feed covers the labels sitting in the field of view, and label length changes with the product, so
+    /// this is a changeover value — and changeovers happen on this screen. In a file it would mean editing
+    /// the file and restarting the program to run a different product.
+    ///
+    /// 它同時決定「檢測站在下游幾格」:程式用 device.json 裡的固定站距除以本值,
+    /// 所以換機種只改這一個數字,偏移就自動跟著對,不必人工換算。
+    /// It also decides how many pitches downstream the verifier sits: the program divides the fixed station
+    /// distance from device.json by this value, so a changeover edits one number and the offset follows with
+    /// no manual conversion.
+    ///
+    /// 上限一百萬:實機傳動比未知,留寬讓現場填得下真實值;下限 1,因為 0 代表料帶不動,
+    /// 同一張標籤會被反覆檢測並反覆寫入追溯紀錄。
+    /// The maximum is a million because the real drive ratio is not yet known and the line must be able to
+    /// enter the true value; the minimum is one, because zero leaves the web still and one label would be
+    /// inspected and logged over and over.
+    /// </summary>
+    private readonly NumericUpDown _feedPitchBox = new()
+    {
+        Minimum = 1, Maximum = 1_000_000, Value = 10_000, Increment = 100, Width = 90,
+        ThousandsSeparator = true,
+    };
+
     private readonly Button _saveRecipeButton = new() { Text = "儲存配方 Save", Width = 130, Height = 30 };
 
     private readonly ListView _recordList = new()
@@ -329,6 +358,8 @@ internal sealed class MainForm : Form
             _minimumGradeBox,
             new Label { Text = "字符區域 Regions (0=不檢查 off):", AutoSize = true, Padding = new Padding(12, 8, 0, 0) },
             _regionCountBox,
+            new Label { Text = "一格脈波 Pulses/feed:", AutoSize = true, Padding = new Padding(12, 8, 0, 0) },
+            _feedPitchBox,
             _saveRecipeButton,
         ]);
 
@@ -499,6 +530,7 @@ internal sealed class MainForm : Form
                 BarcodeLength = (int)_barcodeLengthBox.Value,
                 MinimumCodeGrade = _checkGradeBox.Checked ? (int)_minimumGradeBox.Value : null,
                 ExpectedCharacterRegionCount = (int)_regionCountBox.Value,
+                FeedPitchPulses = (int)_feedPitchBox.Value,
             };
 
             await _recipes.SaveAsync(recipe).ConfigureAwait(true);
@@ -512,7 +544,15 @@ internal sealed class MainForm : Form
                 : recipe.ExpectedCharacterRegionCount.ToString(CultureInfo.InvariantCulture);
 
             AppendLog(string.Create(CultureInfo.InvariantCulture,
-                $"配方已儲存 / Recipe saved: {recipe.ModelName} ({recipe.ExpectedCodeCount} code(s), length {recipe.BarcodeLength}, grade ≥ {recipe.MinimumCodeGrade?.ToString(CultureInfo.InvariantCulture) ?? "off"}, regions {regions})"));
+                $"配方已儲存 / Recipe saved: {recipe.ModelName} ({recipe.ExpectedCodeCount} code(s), length {recipe.BarcodeLength}, grade ≥ {recipe.MinimumCodeGrade?.ToString(CultureInfo.InvariantCulture) ?? "off"}, regions {regions}, {recipe.FeedPitchPulses} pulses/feed)"));
+
+            // 一格脈波數改變會同時改變料帶走的距離與「檢測站在下游幾格」,
+            // 所以要提醒重新初始化 —— 那是重算偏移並清空在製品佇列的地方。
+            // Changing the pulses per feed changes both how far the web moves and how many pitches downstream
+            // the verifier sits, so it prompts a re-initialise: that is where the offset is recomputed and the
+            // in-flight queue cleared.
+            AppendLog("一格脈波數已變更時請重新初始化,讓相隔格數重新換算 / re-initialise after changing the "
+                + "pulses per feed so the station offset is recomputed.");
         }
         catch (InvalidRecipeException ex)
         {
@@ -775,6 +815,7 @@ internal sealed class MainForm : Form
         _codeCountBox.Value = Clamp(current.ExpectedCodeCount, _codeCountBox);
         _barcodeLengthBox.Value = Clamp(current.BarcodeLength, _barcodeLengthBox);
         _regionCountBox.Value = Clamp(current.ExpectedCharacterRegionCount, _regionCountBox);
+        _feedPitchBox.Value = Clamp(current.FeedPitchPulses, _feedPitchBox);
 
         _checkGradeBox.Checked = current.MinimumCodeGrade.HasValue;
         _minimumGradeBox.Enabled = _checkGradeBox.Checked;

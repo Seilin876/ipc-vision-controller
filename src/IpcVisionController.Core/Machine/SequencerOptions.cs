@@ -14,14 +14,6 @@ namespace IpcVisionController.Core.Machine;
 /// </summary>
 public sealed class SequencerOptions
 {
-    /// <summary>
-    /// 一格標籤的進給量（脈波）/ Pulses in one label pitch.
-    /// 由標籤間距與傳動比決定,屬於機構參數;標籤規格改變時才需要重算。
-    /// Derived from the label pitch and the drive ratio — a mechanical parameter,
-    /// recomputed only when the label stock itself changes.
-    /// </summary>
-    public int FeedPitchPulses { get; init; } = 10_000;
-
     /// <summary>進給速度（脈波/秒）/ Feed velocity in pulses per second.</summary>
     public int FeedSpeedPulsePerSecond { get; init; } = 20_000;
 
@@ -38,39 +30,68 @@ public sealed class SequencerOptions
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(15);
 
     /// <summary>
-    /// 讀碼站到字符檢測站相隔幾格 / Pitches from the code-reading station to the verification station.
+    /// 讀碼站到字符檢測站的距離（脈波)/ Pulses from the code-reading station to the verification station.
     ///
     /// 0 表示兩個感測器瞄同一個位置,同一張標籤在一次停頓中被兩台都看過。
-    /// 大於 0 表示標籤先在讀碼站被掃,再前進這麼多格才抵達字符檢測站 ——
-    /// 現場機構是「先 SR-X300 掃碼,再觸發 IV4 檢測」,因此正常值為正。
-    /// Zero means both sensors look at the same position and one label is seen by both in a single
-    /// dwell. A positive value means the label is scanned at the reading station and then advances
-    /// this many pitches before reaching the verification station, which is what the line's mechanism
-    /// does: scan on the SR-X300 first, then trigger the IV4.
+    /// Zero means both sensors look at the same position and one label is seen by both in a single dwell.
     ///
-    /// 為什麼這個值必須存在,而不是預設兩台看同一張 /
-    /// Why this has to exist rather than assuming both see the same label:
+    /// 為什麼記距離而不是記格數 / Why a distance rather than a pitch count:
+    /// 字符檢測器鎖在固定位置,所以這個距離一輩子不變 —— 它是不折不扣的機構參數。
+    /// 而「相隔幾格」會隨標籤長度改變:同一個距離,標籤短就是多格,標籤長就是少格。
+    /// 若設定記的是格數,換機種時現場得自己重算,而算錯不會報錯,只會讓追溯紀錄把不同標籤的
+    /// 兩半湊在一起。記距離、讓程式除以配方裡的一格脈波數,那一步人工換算就從流程裡消失。
+    /// The verifier is bolted in one place, so this distance never changes — it is mechanical in the
+    /// strictest sense. A pitch count is not: the same distance is more pitches with short labels and fewer
+    /// with long ones. Storing the count would leave the line to recompute it at every changeover, where a
+    /// mistake never announces itself and merely pairs halves of different labels in the traceability
+    /// record. Storing the distance and dividing by the recipe's pitch removes that conversion.
+    ///
+    /// 為什麼這件事非做不可 / Why this matters at all:
     /// 檢測週期是「進給一格 → 讀碼 → 字符檢測 → 合成一筆紀錄」。若兩站相隔 k 格而程式當成 0,
-    /// 那筆紀錄會把讀碼站看到的第 N 張與檢測站看到的第 N−k 張湊在一起。
-    /// 它不會報錯,良率也正常,但條碼與字符對不上 —— 而且每一筆看起來都完整,
-    /// 事後從追溯資料裡看不出來。那是這支程式能造成的最嚴重錯誤。
-    /// The cycle is feed one pitch, read the code, verify the characters, write one record. If the two
-    /// stations are k pitches apart and the program assumes zero, that record pairs the reading
-    /// station's label N with the verification station's label N−k. Nothing errors, the yield looks
-    /// normal, and the code and the characters simply do not belong to each other — while every row
-    /// looks complete and nothing in the traceability data reveals it. That is the worst thing this
-    /// program can do.
-    ///
-    /// 為什麼是機構參數而不是配方參數 / Why this is mechanical rather than per-product:
-    /// 它由兩個感測器的安裝距離決定。若日後標籤間距隨機種改變而安裝距離不變,格數就會隨機種變動,
-    /// 那時這個值要改成由「安裝距離 ÷ 標籤間距」推算,或移進配方 —— 目前 FeedPitchPulses
-    /// 同樣是機構參數,兩者放在一起才一致。
-    /// It follows from how far apart the two sensors are mounted. If the label pitch later varies by
-    /// product while the mounting distance does not, the pitch count becomes product-dependent and
-    /// this should be derived from mounting distance over pitch, or moved into the recipe. For now
-    /// FeedPitchPulses is mechanical too, and keeping them together is what makes them consistent.
+    /// 那筆紀錄會把讀碼站看到的第 N 張與檢測站看到的第 N−k 張湊在一起。它不會報錯,良率也正常,
+    /// 但條碼與字符不屬於同一張標籤 —— 而且每一筆看起來都完整,事後從資料裡看不出來。
+    /// The cycle is feed one pitch, read the code, verify the characters, write one record. If the stations
+    /// are k pitches apart and the program assumes zero, that record pairs the reading station's label N
+    /// with the verification station's label N−k. Nothing errors, the yield looks normal, and the code and
+    /// characters simply do not belong together — while every row looks complete and nothing in the data
+    /// reveals it.
     /// </summary>
-    public int InspectionOffsetPitches { get; init; }
+    public int InspectionStationDistancePulses { get; init; }
+
+    /// <summary>
+    /// 換算成相隔幾格 / The distance expressed as a pitch count.
+    /// </summary>
+    /// <param name="feedPitchPulses">配方裡的一格脈波數 / The recipe's pulses per feed.</param>
+    /// <returns>
+    /// 四捨五入後的格數。除不盡代表感測器沒有落在標籤邊界上,那幾乎一定是有個數字填錯了,
+    /// 但取整仍取最接近的一格 —— 讓機台跑得起來,再由初始化訊息把不整齊說出來。
+    /// The pitch count, rounded. A remainder means the sensor does not sit on a label boundary, which is
+    /// almost certainly a mistyped number; the nearest whole pitch is still used so the machine runs, with
+    /// the initialise log saying that it did not divide evenly.
+    /// </returns>
+    public int OffsetPitchesFor(int feedPitchPulses)
+    {
+        if (feedPitchPulses <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(feedPitchPulses),
+                feedPitchPulses,
+                "一格脈波數必須為正 / pulses per feed must be positive.");
+        }
+
+        return (int)Math.Round(
+            InspectionStationDistancePulses / (double)feedPitchPulses,
+            MidpointRounding.AwayFromZero);
+    }
+
+    /// <summary>
+    /// 距離是否剛好是整數格 / Whether the distance is a whole number of pitches.
+    /// 除不盡時感測器停在兩張標籤之間,那個位置不可重現 —— 初始化時要說出來。
+    /// A remainder leaves the sensor between two labels, a position that does not repeat, and the initialise
+    /// log has to say so.
+    /// </summary>
+    public bool DistanceDividesEvenlyBy(int feedPitchPulses)
+        => feedPitchPulses > 0 && InspectionStationDistancePulses % feedPitchPulses == 0;
 
     /// <summary>
     /// 兩格標籤之間的間隔 / Dwell between label pitches.
@@ -89,16 +110,6 @@ public sealed class SequencerOptions
     /// <exception cref="ArgumentException">設定不合法 / A value is unusable.</exception>
     public void Validate()
     {
-        // 進給量為 0 代表料帶不動,同一張標籤會被反覆檢測並反覆寫入追溯紀錄
-        // A zero pitch leaves the web still, so one label is inspected — and logged —
-        // over and over.
-        if (FeedPitchPulses <= 0)
-        {
-            throw new ArgumentException(
-                $"FeedPitchPulses 必須為正整數,目前為 {FeedPitchPulses} / must be positive.",
-                nameof(FeedPitchPulses));
-        }
-
         if (FeedSpeedPulsePerSecond <= 0)
         {
             throw new ArgumentException(
@@ -118,36 +129,32 @@ public sealed class SequencerOptions
                 nameof(CycleInterval));
         }
 
-        if (InspectionOffsetPitches < 0)
+        if (InspectionStationDistancePulses < 0)
         {
             throw new ArgumentException(
-                $"InspectionOffsetPitches 不可為負,目前為 {InspectionOffsetPitches}"
-                + "（0 表示兩台感測器瞄同一個位置）/ must not be negative (0 means both sensors "
-                + "look at the same position).",
-                nameof(InspectionOffsetPitches));
+                $"InspectionStationDistancePulses 不可為負,目前為 {InspectionStationDistancePulses}"
+                + "（0 表示兩台感測器瞄同一個位置）/ must not be negative (0 means both sensors look at "
+                + "the same position).",
+                nameof(InspectionStationDistancePulses));
         }
 
-        // 上限是防打錯,不是機構限制。誤植成 40 的後果是:前 40 張標籤全部只掃碼不留紀錄,
-        // 而畫面上看起來就是「按了單次觸發卻什麼都沒發生」—— 那會被當成程式壞了。
-        // 真的需要超過這個距離,代表機構改了,那時連同這個上限一起改才是誠實的做法。
-        // The cap guards against a typo rather than the mechanism. A stray 40 would leave the first
-        // forty labels scanned but unrecorded, which on screen reads as "Trigger once does nothing" and
-        // gets taken for a broken program. If a machine genuinely needs more travel than this, the
-        // mechanism changed, and raising the cap alongside it is the honest way to say so.
-        if (InspectionOffsetPitches > MaxInspectionOffsetPitches)
-        {
-            throw new ArgumentException(
-                $"InspectionOffsetPitches 為 {InspectionOffsetPitches},超過上限 {MaxInspectionOffsetPitches}"
-                + $" / exceeds the sanity cap of {MaxInspectionOffsetPitches}.",
-                nameof(InspectionOffsetPitches));
-        }
+        // 距離的上限無法在此判斷:合不合理取決於一格有多長,而一格的長度在配方裡。
+        // 因此上限檢查放在協調器初始化時 —— 那裡兩個數字都在手上。
+        // A cap cannot be judged here, because whether a distance is reasonable depends on how long a pitch
+        // is and that lives in the recipe. The check therefore sits in the sequencer's initialise, where
+        // both numbers are in hand.
     }
 
     /// <summary>
-    /// 兩站相隔格數的合理上限 / Sanity cap on the station offset.
+    /// 換算後格數的合理上限 / Sanity cap on the derived pitch count.
+    ///
+    /// 距離除以一格脈波數之後才檢查。誤植的表徵是「前 N 張標籤只掃碼、不留紀錄」,
+    /// 而畫面上看起來就是「按了單次觸發卻什麼都沒發生」—— 那會被當成程式壞了。
     /// 現場機構為 4 格以內;上限留寬是為了讓「打錯」與「機構真的改了」分得開。
-    /// The line's mechanism is within four pitches; the cap is left loose so that a typo and a genuine
-    /// change of mechanism remain distinguishable.
+    /// Checked after the distance is divided by the pulses per feed. A mistyped value presents as the first
+    /// N labels being scanned without a record, which on screen reads as "Trigger once does nothing" and
+    /// gets taken for a broken program. The line's mechanism is within four pitches; the cap is left loose
+    /// so that a typo and a genuine change of mechanism stay distinguishable.
     /// </summary>
     public const int MaxInspectionOffsetPitches = 16;
 

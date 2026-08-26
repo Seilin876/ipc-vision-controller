@@ -44,5 +44,24 @@
   // CharacterTextFields in device.json to []: the two describe different things, namely what
   // the sensor emits versus what this product requires. The code count cannot be zero, so the
   // station always checks at least one thing.
-  "ExpectedCharacterRegionCount": 2
+  "ExpectedCharacterRegionCount": 2,
+
+  // 一次進給的脈波數。下給馬達的相對進給量，也就是料帶一次走多遠。
+  // 一次進給要涵蓋「視野裡那幾張標籤」，而標籤長度與一次涵蓋幾張都隨機種變，
+  // 所以它在配方裡，並且可以在主畫面直接調整（配方 Recipe → 一格脈波 Pulses/feed）。
+  // Pulses commanded for one feed — the relative move handed to the drive, and so how far the web travels.
+  // One feed has to cover the labels sitting in the field of view, and both the label length and how many
+  // fit change with the product, so it lives in the recipe and is editable on the main screen.
+  //
+  // 它同時決定「字符檢測站在下游幾格」：程式用 device.json 裡的固定站距除以本值。
+  // 因此改了本值之後請重新初始化，讓偏移重新換算。
+  // It also decides how many pitches downstream the verification station sits, because the program divides
+  // the fixed station distance in device.json by this value. Re-initialise after changing it so the offset
+  // is recomputed.
+  //
+  // 0 或負數不合法：0 代表料帶不動，同一張標籤會被反覆檢測並反覆寫入追溯紀錄 ——
+  // 良率看起來正常，而資料庫裡是同一張標籤的幾百筆紀錄。
+  // Zero or negative is refused: a zero pitch leaves the web still and one label is inspected and logged
+  // over and over, so the yield looks normal while the database fills with rows for a single label.
+  "FeedPitchPulses": 10000
 }

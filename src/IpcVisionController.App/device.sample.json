@@ -30,28 +30,42 @@
   // layout presents as "every label rejects", which looks exactly like bad print and exactly like
   // a sensor out of focus, so read the frame first rather than guessing from the verdicts.
 
-  // ── 兩站相隔幾格 / Pitches between the two stations ──
+  // ── 兩站的物理距離 / The physical distance between the stations ──
   //
-  // 讀碼站到字符檢測站之間，標籤要前進幾格。機構是「先 SR-X300 掃碼，再前進、再觸發 IV4」，
-  // 所以正常值為正；兩台瞄同一個位置時填 0。
-  // How many pitches a label advances from the reading station to the verification station. The
-  // mechanism scans on the SR-X300, advances, then triggers the IV4, so the normal value is positive;
-  // use 0 when both sensors look at the same position.
+  // 讀碼站到字符檢測站之間，料帶要走幾個脈波。字符檢測器鎖在固定位置，所以這個距離
+  // 一輩子不變 —— 它是機構事實，屬於本檔。
+  // How many pulses the web travels from the reading station to the verification station. The verifier is
+  // bolted in one place, so this distance never changes: a mechanical fact, and this file's business.
   //
-  // 填錯的後果不是「跑不動」，而是追溯紀錄把讀碼站看到的第 N 張與檢測站看到的第 N−k 張
-  // 湊成一筆 —— 不會報錯、良率正常、每一筆看起來都完整，但兩半不屬於同一張標籤。
-  // 這是這支程式能造成的最嚴重錯誤，請務必照實際機構填。
-  // A wrong value does not stop the machine: it pairs the reading station's label N with the
-  // verification station's label N−k in one record. Nothing errors, the yield looks normal and every
-  // row looks complete, while the two halves belong to different labels. This is the worst thing this
-  // program can do, so set it from the actual mechanism.
+  // 「相隔幾格」由程式自己算（本值 ÷ 配方的一格脈波數），不必人工換算。
+  // 同一個距離，標籤短就是多格、標籤長就是少格 —— 所以格數屬於配方而不是本檔。
+  // 換機種只要在主畫面改「一格脈波」，偏移就自動跟著對。
+  // The pitch count is derived by the program, dividing this by the recipe's pulses per feed, with no manual
+  // conversion. The same distance is more pitches with short labels and fewer with long ones, so the count
+  // belongs to the recipe rather than here: a changeover edits the pulses per feed on the main screen and
+  // the offset follows.
+  //
+  // 尚未導入字符檢測（device.json 沒有 CharacterVerifier 那一段）時可以整行省略。
+  // 有 CharacterVerifier 時則「必填」，即使是 0 —— 0 表示兩台瞄同一個位置。
+  // 為什麼不預設 0：漏填而被當成 0 的後果是每一筆紀錄都把讀碼站看到的第 N 張與檢測站
+  // 看到的第 N−k 張湊在一起，不報錯、良率正常、每一筆看起來都完整。
+  // Omit the line entirely while there is no CharacterVerifier section. With one present it is required,
+  // even as 0, which means both sensors look at the same position. It has no default because an omission
+  // taken as zero would pair the reading station's label N with the verification station's label N−k in
+  // every record — no error, a normal yield, every row looking complete.
+  //
+  // 除不盡時感測器沒有落在標籤邊界上，程式會取最接近的格數並在初始化訊息裡說出來。
+  // 那通常代表兩個數字之一填錯了。
+  // A remainder means the sensor does not sit on a label boundary; the program uses the nearest count and
+  // says so in the initialise log. It usually means one of the two numbers is wrong.
   //
   // 現場會看到的行為：初始化後前 k 次觸發只掃碼、不產生紀錄，訊息區顯示「標籤前進中」，
   // 第 k+1 次才出現第一筆判定。停機時兩站之間那 k 張會被作廢並在訊息區報出張數。
-  // What the line sees: after initialising, the first k triggers only scan and produce no record, the
-  // log says the label is advancing, and the first verdict appears on trigger k+1. On a stop the k
-  // labels between the stations are voided and their count is reported in the log.
-  "InspectionOffsetPitches": 4,
+  // What the line sees: after initialising, the first k triggers only scan and produce no record, the log
+  // says the label is advancing, and the first verdict appears on trigger k+1. On a stop the k labels
+  // between the stations are voided and their count is reported.
+  //
+  // "InspectionStationDistancePulses": 40000,
 
   "CodeReader": {
     // Keyence SR-X300。設定軟體：AutoID Network Navigator → 乙太網頁籤。
@@ -111,22 +125,28 @@
 
     // 以此開頭的電文視為裝置自身異常 → 停線，不會被記成一張不良標籤。
     // A frame starting with this is a device-level fault: stop the line, do not log a bad label.
-    "ErrorPrefix": "ER",
+    //
+    // SR-X300 刻意停用（空字串）。實測讀不到時它輸出 "ERROR"，而那以 "ER" 開頭 ——
+    // 沿用 "ER" 的話，「一張標籤漏貼」會被判成設備異常而停線，那應該是判退後繼續生產。
+    // 而且遮住六張中的一張與遮住全部六張輸出相同，所以這是每批都會遇到的常態，不是例外。
+    // Deliberately disabled for the SR-X300. In practice it emits "ERROR" on a failed read, which starts
+    // with "ER": keeping that prefix turns one missing label into an equipment fault and stops the line,
+    // when it should reject and carry on. Covering one of six labels produces the same output as covering
+    // all six, so this is routine rather than exceptional.
+    //
+    // 代價：停用之後，讀碼器若另有一種真正的設備異常電文，那筆也會被當成「沒讀到」而判退。
+    // 若日後量到那個字樣，填進本欄即可恢復停線。
+    // The cost: a genuine device-fault frame, if one exists, also reads as a failed read and rejects. Should
+    // one be measured later, putting it here restores the line stop.
+    "ErrorPrefix": "",
 
     // 視為「該欄位沒有結果」的字樣，不分大小寫。空欄位一律視為沒有結果。
     // 讀不到的那一筆會落在這裡，於是不進結果清單，改由配方的筆數檢查判退 —— 那是漏貼標籤
-    // 唯一會被抓到的地方。請用實機量一次「讀不到」的電文再確認這份清單。
-    // Tokens meaning "no result in this field", case-insensitive; an empty field always counts. A failed
-    // read lands here, stays out of the result list, and is rejected by the recipe's count check — the one
-    // place a missing label is caught. Confirm this list against a real no-read frame.
-    //
-    // 注意：若讀不到時輸出的字樣以 ErrorPrefix 開頭（例如 "ERROR" 之於 "ER"），
-    // 一張漏貼的標籤會被當成設備異常而停線。那時要把 ErrorPrefix 設為 ""（停用），
-    // 並把該字樣列進本清單。
-    // Careful: if the no-read token starts with ErrorPrefix — "ERROR" against "ER", say — one missing label
-    // stops the line as an equipment fault. Set ErrorPrefix to "" to disable that check and list the token
-    // here instead.
-    "EmptyTokens": ["NG", "NOREAD", "----"],
+    // 唯一會被抓到的地方。"ERROR" 是 SR-X300 實測的 no-read 字樣。
+    // Tokens meaning "no result in this field", case-insensitive; an empty field always counts. A failed read
+    // lands here, stays out of the result list, and is rejected by the recipe's count check — the one place a
+    // missing label is caught. "ERROR" is the SR-X300's measured no-read token.
+    "EmptyTokens": ["ERROR", "NG", "NOREAD", "----"],
 
     // ── 電文結構 / Frame structure ──
     //

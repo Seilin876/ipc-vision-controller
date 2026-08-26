@@ -233,6 +233,42 @@ public sealed class DeviceSettingsTests : IDisposable
     }
 
     [Fact]
+    public void Validate_WithAVerifierButNoStationDistance_IsRejected()
+    {
+        // 有字符檢測站就必須說明它裝在下游多遠。漏填而被當成 0 的後果是每一筆紀錄都把
+        // 讀碼站看到的第 N 張與檢測站看到的第 N−k 張湊在一起 —— 不報錯、良率正常、
+        // 每一筆看起來都完整。這是整份設定裡最不能默認的一個值。
+        // A verification station has to say how far downstream it sits. An omission taken as zero pairs the
+        // reading station's label N with the verification station's label N−k in every record, without an
+        // error, with a normal yield and with every row looking complete. It is the one value here that must
+        // not have a silent default.
+        var settings = new DeviceSettings
+        {
+            CodeReader = ValidReader(),
+            CharacterVerifier = ValidVerifier(),
+        };
+
+        Assert.Throws<ArgumentException>(settings.Validate);
+    }
+
+    [Fact]
+    public void Validate_WithAVerifierAndAStatedDistance_Passes()
+    {
+        // 0 是合法的:那表示兩台感測器瞄同一個位置。合法的 0 與漏填必須分得開,
+        // 所以型別是可為 null 而不是預設 0。
+        // Zero is legal and means both sensors look at the same position. A deliberate zero has to be
+        // distinguishable from an omission, which is why the type is nullable rather than defaulting.
+        var settings = new DeviceSettings
+        {
+            CodeReader = ValidReader(),
+            CharacterVerifier = ValidVerifier(),
+            InspectionStationDistancePulses = 0,
+        };
+
+        settings.Validate();
+    }
+
+    [Fact]
     public void Validate_WithNoVerifierSection_Passes()
     {
         // 這正是目前現場的狀態：只有 SR-X300,IV4 之後才上
@@ -255,7 +291,12 @@ public sealed class DeviceSettingsTests : IDisposable
         verifier.Host = "192.168.1.10";
         verifier.Port = 9004;
 
-        var settings = new DeviceSettings { CodeReader = ValidReader(), CharacterVerifier = verifier };
+        var settings = new DeviceSettings
+        {
+            CodeReader = ValidReader(),
+            CharacterVerifier = verifier,
+            InspectionStationDistancePulses = 0,
+        };
 
         Assert.Throws<ArgumentException>(settings.Validate);
     }
@@ -308,7 +349,7 @@ public sealed class DeviceSettingsTests : IDisposable
         var path = Path.Combine(_workspace.Root, "device.json");
         await File.WriteAllTextAsync(path, """
             {
-              "InspectionOffsetPitches": 4,
+              "InspectionStationDistancePulses": 40000,
               "CodeReader": {
                 "Host": "192.168.1.10",
                 "Port": 9004,
@@ -321,17 +362,19 @@ public sealed class DeviceSettingsTests : IDisposable
         var settings = await DeviceSettings.LoadAsync(path);
 
         Assert.NotNull(settings);
-        Assert.Equal(4, settings.InspectionOffsetPitches);
+        Assert.Equal(40_000, settings.InspectionStationDistancePulses);
     }
 
     [Fact]
-    public async Task LoadAsync_WithNoStationOffset_DefaultsToBothSensorsOnOneLabel()
+    public async Task LoadAsync_WithNoStationDistance_LeavesItUnstated()
     {
-        // 省略時視為 0。這是唯一安全的預設:0 的行為與「兩台瞄同一位置」完全一致,
-        // 而猜一個正數會讓沒有相隔的機構前幾張標籤憑空消失。
-        // Omitted means zero, the only safe default: it behaves exactly as both sensors sharing one
-        // position, whereas guessing a positive value would make the first few labels of a machine with
-        // no offset vanish for no reason.
+        // 省略時保持 null,而不是預設成 0。0 是有意義的值（兩台瞄同一位置),
+        // 把「漏填」也當成 0,一台真的有下游檢測站的機器就會安靜地把不同標籤的兩半湊成一筆紀錄。
+        // 沒有 CharacterVerifier 時這個值無關,所以省略是合法的 —— 那正是目前現場的狀態。
+        // An omission stays null rather than defaulting to zero. Zero is a meaningful value — both sensors on
+        // one position — and treating an omission as zero would let a machine that genuinely has a downstream
+        // station quietly pair halves of different labels. With no CharacterVerifier the value is irrelevant,
+        // so omitting it is legal, and that is exactly the line's present state.
         var path = Path.Combine(_workspace.Root, "device.json");
         await File.WriteAllTextAsync(path, """
             {
@@ -347,7 +390,7 @@ public sealed class DeviceSettingsTests : IDisposable
         var settings = await DeviceSettings.LoadAsync(path);
 
         Assert.NotNull(settings);
-        Assert.Equal(0, settings.InspectionOffsetPitches);
+        Assert.Null(settings.InspectionStationDistancePulses);
     }
 
     [Fact]

@@ -256,7 +256,7 @@ public sealed class InspectionSequencerTests : IDisposable
         // 每個週期剛好一格。多走一格會整批跳過標籤,少走一格會重複檢測同一張。
         // Exactly one pitch per cycle: feeding more skips labels wholesale, feeding less
         // inspects the same label twice.
-        Assert.Equal(rig.Options.FeedPitchPulses * 2, rig.Motor.CurrentPosition);
+        Assert.Equal(rig.Recipes.Current.FeedPitchPulses * 2, rig.Motor.CurrentPosition);
     }
 
     [Fact]
@@ -427,7 +427,7 @@ public sealed class InspectionSequencerTests : IDisposable
         using var cts = new CancellationTokenSource();
         var cycle = rig.Sequencer.RunCycleAsync(cts.Token);
         await WaitUntilAsync(
-            () => rig.Motor.CurrentPosition >= rig.Options.FeedPitchPulses,
+            () => rig.Motor.CurrentPosition >= rig.Recipes.Current.FeedPitchPulses,
             "料帶進給完成 / the web to finish its pitch");
         await cts.CancelAsync();
 
@@ -532,7 +532,7 @@ public sealed class InspectionSequencerTests : IDisposable
 
         rig.Sequencer.Start();
         await WaitUntilAsync(
-            () => rig.Motor.CurrentPosition >= rig.Options.FeedPitchPulses,
+            () => rig.Motor.CurrentPosition >= rig.Recipes.Current.FeedPitchPulses,
             "週期進行到讀碼動作 / the cycle to reach the code read");
         await rig.Sequencer.StopAsync();
 
@@ -550,7 +550,7 @@ public sealed class InspectionSequencerTests : IDisposable
 
         rig.Sequencer.Start();
         await WaitUntilAsync(
-            () => rig.Motor.CurrentPosition >= rig.Options.FeedPitchPulses,
+            () => rig.Motor.CurrentPosition >= rig.Recipes.Current.FeedPitchPulses,
             "週期進行到讀碼動作 / the cycle to reach the code read");
         await rig.Sequencer.StopAsync();
 
@@ -665,7 +665,7 @@ public sealed class InspectionSequencerTests : IDisposable
         // one verdict checked at a time.
         await Task.Delay(TimeSpan.FromMilliseconds(200));
 
-        Assert.Equal(rig.Options.FeedPitchPulses, rig.Motor.CurrentPosition);
+        Assert.Equal(rig.Recipes.Current.FeedPitchPulses, rig.Motor.CurrentPosition);
         Assert.Equal(1, rig.Sequencer.CycleCount);
         Assert.Equal(MachineState.Idle, rig.Sequencer.State);
     }
@@ -702,7 +702,7 @@ public sealed class InspectionSequencerTests : IDisposable
             () => rig.Sequencer.TriggerOnceAsync());
 
         Assert.NotNull(await inFlight);
-        Assert.Equal(rig.Options.FeedPitchPulses, rig.Motor.CurrentPosition);
+        Assert.Equal(rig.Recipes.Current.FeedPitchPulses, rig.Motor.CurrentPosition);
         Assert.Equal(1, rig.Sequencer.CycleCount);
     }
 
@@ -776,21 +776,34 @@ public sealed class InspectionSequencerTests : IDisposable
     // ── 兩站相隔的暫存 / The two-station shift register ──────────────────────
 
     /// <summary>
+    /// 預設配方的一格脈波數 / The default recipe's pulses per feed.
+    /// 站距要以它的倍數表示,格數才會剛好整除 —— 除不盡代表感測器沒落在標籤邊界上,
+    /// 那是另一組測試在驗的事,不該混進偏移本身的測試裡。
+    /// The station distance is expressed as a multiple of this so the pitch count divides evenly; a remainder
+    /// means the sensor does not sit on a label boundary, which other cases cover and should not leak into
+    /// the tests of the offset itself.
+    /// </summary>
+    private const int DefaultRecipePitchPulses = 10_000;
+
+    /// <summary>
     /// 相隔 k 格的站別設定 / Options for stations k pitches apart.
+    /// 設定裡記的是「距離」,格數由協調器除以配方的一格脈波數推算 ——
+    /// 所以這裡把想要的格數乘回去。
+    /// The options hold a distance and the sequencer derives the pitch count by dividing by the recipe's
+    /// pulses per feed, so the wanted count is multiplied back out here.
     /// </summary>
     private static SequencerOptions OffsetOptions(int pitches)
     {
         var fast = FastOptions();
         return new SequencerOptions
         {
-            FeedPitchPulses = fast.FeedPitchPulses,
             FeedSpeedPulsePerSecond = fast.FeedSpeedPulsePerSecond,
             FeedTimeout = fast.FeedTimeout,
             CodeReadTimeout = fast.CodeReadTimeout,
             CharacterVerifyTimeout = fast.CharacterVerifyTimeout,
             ConnectTimeout = fast.ConnectTimeout,
             CycleInterval = TimeSpan.Zero,
-            InspectionOffsetPitches = pitches,
+            InspectionStationDistancePulses = pitches * DefaultRecipePitchPulses,
         };
     }
 
@@ -879,12 +892,18 @@ public sealed class InspectionSequencerTests : IDisposable
 
         // 換線：新機種要求兩筆條碼,而在製品那一張只有一筆
         // Changeover: the incoming product wants two codes, and the label in flight has one.
+        // 一格脈波數維持不變:改變它會同時改變相隔格數,而那會讓在製品被作廢 ——
+        // 那是另一項測試在驗的行為,這一項要驗的是「舊配方判定在製品」。
+        // The pulses per feed are kept the same: changing them changes the pitch count too, which voids the
+        // work in progress. That behaviour is covered elsewhere; this case is about the outgoing recipe
+        // judging its own labels.
         await rig.Recipes.SaveAsync(new RecipeModel
         {
             ModelName = "MODEL-NEW",
             ExpectedCodeCount = 2,
             BarcodeLength = RecipeModel.NoCheck,
             ExpectedCharacterRegionCount = 1,
+            FeedPitchPulses = DefaultRecipePitchPulses,
         });
 
         var record = await rig.Sequencer.RunCycleAsync(CancellationToken.None);
@@ -980,7 +999,6 @@ public sealed class InspectionSequencerTests : IDisposable
         TimeSpan? characterVerifyTimeout = null,
         TimeSpan? connectTimeout = null) => new()
         {
-            FeedPitchPulses = 100,
             FeedSpeedPulsePerSecond = 1_000_000,
             FeedTimeout = feedTimeout ?? TimeSpan.FromSeconds(5),
             CodeReadTimeout = codeReadTimeout ?? TimeSpan.FromSeconds(5),

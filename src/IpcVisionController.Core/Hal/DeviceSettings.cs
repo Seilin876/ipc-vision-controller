@@ -34,24 +34,29 @@ public sealed class DeviceSettings
     public Iv4Options? CharacterVerifier { get; set; }
 
     /// <summary>
-    /// 讀碼站到字符檢測站相隔幾格 / Pitches from the code-reading station to the verification station.
+    /// 讀碼站到字符檢測站的距離（脈波)；未導入字符檢測時可省略 /
+    /// Pulses from the code-reading station to the verification station; may be omitted with no verifier.
     ///
-    /// 為什麼這個機構參數放在 device.json /
-    /// Why this mechanical value lives in device.json:
-    /// 它描述的正是「這兩台裝置裝得多遠」—— 是兩台裝置之間的物理關係,而這個檔案就是在描述
-    /// 這台機器接了哪些裝置。放在配方裡會被換線改掉,而它與機種無關;
-    /// 寫死在程式裡則要為了一個安裝距離重新發佈,而現場沒有 SDK。
-    /// It describes how far apart these two devices are mounted — a physical relationship between them,
-    /// and this file is what describes which devices this machine has. In the recipe it would be
-    /// clobbered at a changeover despite having nothing to do with the product; in code it would mean a
-    /// redeploy for a mounting distance, and the line has no SDK.
+    /// 為什麼記距離而不是記格數 / Why a distance rather than a pitch count:
+    /// 字符檢測器鎖在固定位置,這個距離一輩子不變 —— 它屬於 device.json 描述的「這台機器長怎樣」。
+    /// 而「相隔幾格」會隨標籤長度改變,所以它屬於配方,而且程式自己算得出來
+    /// （距離 ÷ 配方的一格脈波數),不需要現場動手換算。少一步人工換算,就少一種
+    /// 「算錯而且不會報錯」的失誤。
+    /// The verifier is bolted in one place, so this distance never changes and belongs to what device.json
+    /// describes: the shape of this machine. A pitch count does change with label length, so it belongs to
+    /// the recipe — and the program can work it out itself by dividing, sparing the line a manual conversion
+    /// and with it one more way to be wrong without being told.
     ///
-    /// 值由 <see cref="Machine.SequencerOptions.Validate"/> 把關,不在此重複驗證 ——
-    /// 同一條規則寫兩次,遲早會有一邊被改到而另一邊沒有。
-    /// The value is policed by the sequencer's own validation rather than checked again here: one rule
-    /// written twice eventually has one side edited and the other left behind.
+    /// 為什麼是可為 null 而不是預設 0 / Why nullable rather than defaulting to zero:
+    /// 0 是合法的值,它表示「兩台感測器瞄同一個位置」。若把「漏填」也當成 0,一台真的有下游
+    /// 檢測站的機器就會安靜地把不同標籤的兩半湊成一筆紀錄 —— 那不會報錯,良率也正常。
+    /// 因此:有 CharacterVerifier 就必須明確填寫;沒有的話這個值無關,可以省略。
+    /// Zero is a legal value meaning both sensors look at the same position. Treating an omission as zero
+    /// would let a machine that genuinely has a downstream station quietly pair halves of different labels,
+    /// without an error and with a normal-looking yield. So: required whenever CharacterVerifier is present,
+    /// and irrelevant — omittable — when it is not.
     /// </summary>
-    public int InspectionOffsetPitches { get; set; }
+    public int? InspectionStationDistancePulses { get; set; }
 
     /// <summary>
     /// 驗證整份設定 / Validate the whole file.
@@ -68,6 +73,22 @@ public sealed class DeviceSettings
 
         CodeReader.Validate();
         CharacterVerifier?.Validate();
+
+        // 有字符檢測站就必須說明它裝在下游多遠。漏填而被當成 0 的後果是每一筆紀錄都把
+        // 讀碼站看到的第 N 張與檢測站看到的第 N−k 張湊在一起 —— 不報錯、良率正常、
+        // 每一筆看起來都完整。這是本檔最不能默認的一個值。
+        // A verification station has to say how far downstream it sits. An omission taken as zero would pair
+        // the reading station's label N with the verification station's label N−k in every record, without an
+        // error, with a normal yield and with every row looking complete. It is the one value in this file
+        // that must not have a silent default.
+        if (CharacterVerifier is not null && InspectionStationDistancePulses is null)
+        {
+            throw new ArgumentException(
+                "有 CharacterVerifier 時必須填寫 InspectionStationDistancePulses"
+                + "（兩台瞄同一位置就填 0）/ is required whenever CharacterVerifier is present; use 0 when "
+                + "both sensors look at the same position.",
+                nameof(InspectionStationDistancePulses));
+        }
 
         // 兩台裝置設成同一個位址與埠,幾乎確定是複製設定時忘了改。
         // 真接上去的話,兩條連線會搶同一台裝置 —— 多數工業裝置只接受一條,

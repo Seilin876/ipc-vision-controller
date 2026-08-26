@@ -74,6 +74,30 @@ public sealed class RecipeModel
     public int ExpectedCharacterRegionCount { get; set; } = 1;
 
     /// <summary>
+    /// 一次進給的脈波數 / Pulses commanded for one feed.
+    ///
+    /// 為什麼在配方而不在機構設定 / Why this is per-product rather than mechanical:
+    /// 一次進給要走「視野裡那幾張標籤」的距離,而標籤長度與一次進給涵蓋幾張,都隨機種變。
+    /// 放在機構設定裡的話,換線時它不會跟著配方切換,料帶就會走錯距離。
+    /// One feed has to cover the labels that sit in the field of view, and both the label length and how
+    /// many fit in one feed change with the product. Kept among the mechanical settings it would not switch
+    /// at a changeover, and the web would advance the wrong distance.
+    ///
+    /// 它同時決定「檢測站在下游幾格」/ It also decides how many pitches downstream the verifier sits:
+    /// 字符檢測器鎖在固定位置,所以讀碼站到檢測站的物理距離不變;但那個距離換算成幾「格」,
+    /// 取決於一格有多長。因此程式不要求現場自己算格數,而是用
+    /// <see cref="Machine.SequencerOptions.InspectionStationDistancePulses"/> 除以本值 ——
+    /// 換機種只改這一個數字,偏移就自動跟著對。人工換算的那一步從流程裡消失,
+    /// 而那一步算錯是不會報錯的。
+    /// The verifier is bolted in one place, so the physical distance from the reading station is fixed;
+    /// how many pitches that distance amounts to depends on how long a pitch is. The program therefore does
+    /// not ask anyone to work the pitch count out: it divides the fixed station distance by this value. A
+    /// changeover edits one number and the offset follows, removing a manual conversion whose errors would
+    /// never announce themselves.
+    /// </summary>
+    public int FeedPitchPulses { get; set; } = 10_000;
+
+    /// <summary>
     /// 驗證配方合法性 / Validate the recipe.
     /// 寧可在載入時就失敗,也不要讓不合法的配方污染整批判定結果。
     /// Fail at load time rather than let an invalid recipe corrupt a whole batch of verdicts.
@@ -117,6 +141,16 @@ public sealed class RecipeModel
             throw new InvalidRecipeException(
                 $"MinimumCodeGrade 不可為負,目前為 {MinimumCodeGrade} / must not be negative, got {MinimumCodeGrade}.");
         }
+
+        // 進給量為 0 代表料帶不動,同一張標籤會被反覆檢測並反覆寫入追溯紀錄;
+        // 為負則是反向捲動,那不是這台機構做得到的事。
+        // A zero pitch leaves the web still, so one label is inspected and logged over and over, while a
+        // negative one would wind backwards, which this mechanism cannot do.
+        if (FeedPitchPulses <= 0)
+        {
+            throw new InvalidRecipeException(
+                $"FeedPitchPulses 必須為正整數,目前為 {FeedPitchPulses} / must be positive, got {FeedPitchPulses}.");
+        }
     }
 
     /// <summary>建立複本,避免 UI 直接改動使用中的配方 / A copy, so the UI cannot mutate the live recipe.</summary>
@@ -127,6 +161,7 @@ public sealed class RecipeModel
         BarcodeLength = BarcodeLength,
         MinimumCodeGrade = MinimumCodeGrade,
         ExpectedCharacterRegionCount = ExpectedCharacterRegionCount,
+        FeedPitchPulses = FeedPitchPulses,
     };
 }
 

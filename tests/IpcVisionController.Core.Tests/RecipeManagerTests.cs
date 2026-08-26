@@ -39,6 +39,7 @@ public sealed class RecipeManagerTests : IDisposable
             BarcodeLength = 20,
             MinimumCodeGrade = 65,
             ExpectedCharacterRegionCount = 4,
+            FeedPitchPulses = 24_000,
         });
 
         // 另開一個實例,確保讀的是磁碟而不是記憶體快取
@@ -55,6 +56,7 @@ public sealed class RecipeManagerTests : IDisposable
         Assert.Equal(20, reloaded.BarcodeLength);
         Assert.Equal(65, reloaded.MinimumCodeGrade);
         Assert.Equal(4, reloaded.ExpectedCharacterRegionCount);
+        Assert.Equal(24_000, reloaded.FeedPitchPulses);
     }
 
     [Fact]
@@ -158,6 +160,38 @@ public sealed class RecipeManagerTests : IDisposable
         // Zero means something; a negative number cannot, and only arises from a typo in a
         // hand-edited recipe.
         await Assert.ThrowsAsync<InvalidRecipeException>(() => manager.LoadAsync());
+    }
+
+    [Fact]
+    public async Task LoadAsync_WithANonPositiveFeedPitch_ThrowsInvalidRecipe()
+    {
+        var manager = NewManager();
+        await File.WriteAllTextAsync(manager.FilePath, """
+            { "ModelName": "MODEL-J", "FeedPitchPulses": 0 }
+            """);
+
+        // 進給量為 0 代表料帶不動,同一張標籤會被反覆檢測並反覆寫入追溯紀錄 ——
+        // 良率看起來正常,而資料庫裡是同一張標籤的幾百筆紀錄。
+        // A zero pitch leaves the web still, so one label is inspected and logged over and over: the yield
+        // looks normal while the database fills with hundreds of rows for a single label.
+        await Assert.ThrowsAsync<InvalidRecipeException>(() => manager.LoadAsync());
+    }
+
+    [Fact]
+    public async Task LoadAsync_CarriesTheFeedPitch()
+    {
+        var manager = NewManager();
+        await File.WriteAllTextAsync(manager.FilePath, """
+            { "ModelName": "MODEL-K", "FeedPitchPulses": 24000 }
+            """);
+
+        // 這個值同時決定料帶走多遠、以及檢測站在下游幾格,所以它必須真的從檔案帶出來
+        // —— 靜默用回預設值的後果是兩件事一起錯。
+        // This value decides both how far the web moves and how many pitches downstream the verifier sits, so
+        // it has to genuinely come from the file: silently falling back to a default gets both wrong at once.
+        var recipe = await manager.LoadAsync();
+
+        Assert.Equal(24_000, recipe.FeedPitchPulses);
     }
 
     [Fact]
