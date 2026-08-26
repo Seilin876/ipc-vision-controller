@@ -61,7 +61,7 @@ internal sealed class MainForm : Form
     private readonly Label _positionLabel = new()
     {
         Text = "已進給 Fed: 0",
-        Font = new Font("Consolas", 11F),
+        Font = UiFont.Of(11F),
         TextAlign = ContentAlignment.MiddleCenter,
         Dock = DockStyle.Fill,
     };
@@ -118,7 +118,7 @@ internal sealed class MainForm : Form
         FullRowSelect = true,
         GridLines = true,
         Dock = DockStyle.Fill,
-        Font = new Font("Consolas", 9F),
+        Font = UiFont.Of(9F),
     };
 
     private readonly TextBox _logBox = new()
@@ -127,7 +127,7 @@ internal sealed class MainForm : Form
         ReadOnly = true,
         ScrollBars = ScrollBars.Vertical,
         Dock = DockStyle.Fill,
-        Font = new Font("Consolas", 9F),
+        Font = UiFont.Of(9F),
     };
 
     private readonly System.Windows.Forms.Timer _refreshTimer = new();
@@ -199,6 +199,14 @@ internal sealed class MainForm : Form
     /// </summary>
     private void AppendDeviceModeLog()
     {
+        // 選用的字型要說出來。缺字的表徵是中文變成一格一格的方框,而那看起來像「程式壞了」
+        // 或「資料壞了」—— 兩者都不是。印出字型名稱,現場一眼就能分辨是字型問題,
+        // 而不是去懷疑判定結果。
+        // The chosen font is stated. Missing glyphs present as rows of boxes where Chinese should be, which
+        // reads as a broken program or corrupt data when it is neither. Naming the font lets the line tell a
+        // font problem apart at a glance instead of doubting the verdicts.
+        AppendLog($"畫面字型 / screen font: {UiFont.FamilyName}");
+
         if (_devices.AreMocks)
         {
             AppendLog("模擬模式 / MOCK MODE（以 --mock 啟動 / started with --mock）");
