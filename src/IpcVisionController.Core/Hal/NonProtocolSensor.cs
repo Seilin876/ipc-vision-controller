@@ -126,12 +126,21 @@ public abstract class NonProtocolSensor : IDevice, IRawFrameSource
     }
 
     /// <summary>
-    /// 觸發一次並取回已分格的電文 / Trigger once and return the frame already split into fields.
+    /// 觸發一次並取回電文本文 / Trigger once and return the frame body.
+    ///
+    /// 刻意不在此分格 / Deliberately does not split:
+    /// 兩台裝置的電文結構不同 —— 讀碼器是兩層（多筆記錄,每筆再分欄）,字符檢測器目前假設為單層。
+    /// 在連線層分格就等於挑一種結構強加給兩台,而那正是先前讓讀碼器第二筆之後的結果整批消失
+    /// 的原因。連線層只負責把一筆完整、確認不是設備異常的電文交出去。
+    /// The two devices are shaped differently: the reader is two levels, records subdivided into fields,
+    /// while the verifier is assumed flat. Splitting here would impose one shape on both, which is exactly
+    /// what made everything past the reader's first code disappear. The link layer's job ends at handing
+    /// over one complete frame that is known not to be a device fault.
     /// </summary>
     /// <exception cref="DeviceFaultException">
     /// 通訊失敗,或裝置回報自身異常 / The link failed, or the device reported its own fault.
     /// </exception>
-    protected async Task<string[]> TriggerAndSplitAsync(CancellationToken cancellationToken)
+    protected async Task<string> TriggerAndReadFrameAsync(CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -160,7 +169,7 @@ public abstract class NonProtocolSensor : IDevice, IRawFrameSource
                 // what the line needs to see.
                 RawFrameReceived?.Invoke(this, new RawFrameEventArgs(Name, frame));
 
-                return NonProtocolFrame.SplitFields(frame, _link, Name);
+                return NonProtocolFrame.Clean(frame, _link, Name);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {

@@ -86,9 +86,21 @@ internal sealed class MainForm : Form
         Padding = new Padding(12, 6, 0, 0),
     };
 
+    /// <summary>
+    /// 等級下限 / The grade minimum.
+    ///
+    /// 預設 2 對應 ISO/IEC 15415 / 15416 的 0–4 刻度（4 最好,對應字母 A)——
+    /// 那是 SR-X300 目前輸出的刻度。上限留在 100,讓改成 0–100 的讀取餘裕度時不必動程式。
+    /// 先前預設 70,那是餘裕度刻度的數字;在 0–4 的刻度上,勾選「檢查等級」的那一刻
+    /// 就會讓每一張標籤判退,而看起來像整批印刷不良。
+    /// A default of 2 suits the 0–4 ISO/IEC 15415 and 15416 scale, where 4 is best, which is what the
+    /// SR-X300 emits today. The maximum stays at 100 so a switch to a 0–100 read margin needs no code
+    /// change. The old default of 70 belonged to that margin scale: on a 0–4 scale, ticking the grade
+    /// check would reject every single label and look like a batch of bad print.
+    /// </summary>
     private readonly NumericUpDown _minimumGradeBox = new()
     {
-        Minimum = 0, Maximum = 100, Value = 70, Width = 60, Enabled = false,
+        Minimum = 0, Maximum = 100, Value = 2, Width = 60, Enabled = false,
     };
 
     /// <summary>

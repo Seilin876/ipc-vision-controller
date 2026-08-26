@@ -29,7 +29,7 @@ public sealed class SrX300CodeReader(SrX300Options options) : NonProtocolSensor(
     /// </summary>
     public async Task<IReadOnlyList<CodeResult>> TriggerAsync(CancellationToken cancellationToken)
     {
-        var fields = await TriggerAndSplitAsync(cancellationToken).ConfigureAwait(false);
-        return CodeFrameReader.Read(fields, _options);
+        var frame = await TriggerAndReadFrameAsync(cancellationToken).ConfigureAwait(false);
+        return CodeFrameReader.Read(frame, _options);
     }
 }

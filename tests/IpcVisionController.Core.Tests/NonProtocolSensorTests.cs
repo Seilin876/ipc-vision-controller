@@ -33,8 +33,10 @@ public sealed class NonProtocolSensorTests
         Terminator = FrameTerminator.Cr,
         ConnectTimeoutMs = 2_000,
         ResponseTimeoutMs = 500,
-        CodeDataFields = [1, 3],
-        CodeGradeFields = [2, 4],
+        RecordDelimiter = ",",
+        FieldDelimiter = ":",
+        CodeField = 0,
+        GradeField = 1,
     };
 
     private static Iv4Options VerifierOptions(int port) => new()
@@ -45,7 +47,8 @@ public sealed class NonProtocolSensorTests
         Terminator = FrameTerminator.Cr,
         ConnectTimeoutMs = 2_000,
         ResponseTimeoutMs = 500,
-        CharacterTextFields = [1, 2],
+        FieldDelimiter = ",",
+        CharacterTextFields = [0, 1],
     };
 
     // ── 讀碼器 / The reader ─────────────────────────────────────────────────
@@ -53,7 +56,8 @@ public sealed class NonProtocolSensorTests
     [Fact]
     public async Task Reader_SendsTheConfiguredCommandAndMapsTheReply()
     {
-        await using var server = new FakeNonProtocolServer(_ => ["OK,ABC123456789,88,DEF123456789,91"]);
+        await using var server = new FakeNonProtocolServer(
+            _ => ["2132030090A0S6X10683:3.0,2132030090A0S6X10685:4.0"]);
         await using var reader = new SrX300CodeReader(ReaderOptions(server.Port));
 
         await reader.ConnectAsync(CancellationToken.None);
@@ -61,8 +65,8 @@ public sealed class NonProtocolSensorTests
 
         Assert.True(reader.IsConnected);
         Assert.Equal(["LON"], server.Commands());
-        Assert.Equal(["ABC123456789", "DEF123456789"], codes.Select(c => c.Data));
-        Assert.Equal([88, 91], codes.Select(c => c.Grade));
+        Assert.Equal(["2132030090A0S6X10683", "2132030090A0S6X10685"], codes.Select(c => c.Data));
+        Assert.Equal([3, 4], codes.Select(c => c.Grade));
     }
 
     [Fact]
@@ -73,13 +77,14 @@ public sealed class NonProtocolSensorTests
         // TCP is a byte stream and one frame may arrive across several packets. A driver that assumes
         // one read equals one frame gets a truncated message here — a failure that only shows up when
         // the network is busy and is the hardest to reproduce on the line.
-        await using var server = new FakeNonProtocolServer(_ => ["OK,ABC1234", "56789,88,DEF123456789,91"]);
+        await using var server = new FakeNonProtocolServer(
+            _ => ["2132030090A0S6", "X10683:3.0,2132030090A0S6X10685:4.0"]);
         await using var reader = new SrX300CodeReader(ReaderOptions(server.Port));
 
         await reader.ConnectAsync(CancellationToken.None);
         var codes = await reader.TriggerAsync(CancellationToken.None);
 
-        Assert.Equal("ABC123456789", codes[0].Data);
+        Assert.Equal("2132030090A0S6X10683", codes[0].Data);
     }
 
     [Fact]
@@ -89,15 +94,15 @@ public sealed class NonProtocolSensorTests
         // 記到這一張上 —— 那是追溯資料裡最嚴重的一種錯。
         // Every cycle has to trigger afresh. Returning a cached previous result would log the last
         // label's verdict against this one, the worst kind of error a trace can hold.
-        await using var server = new FakeNonProtocolServer(n => [$"OK,CODE{n},90,,"]);
+        await using var server = new FakeNonProtocolServer(n => [$"2132030090A0S6X1068{n}:3.0"]);
         await using var reader = new SrX300CodeReader(ReaderOptions(server.Port));
 
         await reader.ConnectAsync(CancellationToken.None);
         var first = await reader.TriggerAsync(CancellationToken.None);
         var second = await reader.TriggerAsync(CancellationToken.None);
 
-        Assert.Equal("CODE0", first[0].Data);
-        Assert.Equal("CODE1", second[0].Data);
+        Assert.Equal("2132030090A0S6X10680", first[0].Data);
+        Assert.Equal("2132030090A0S6X10681", second[0].Data);
         Assert.Equal(["LON", "LON"], server.Commands());
     }
 
@@ -109,14 +114,14 @@ public sealed class NonProtocolSensorTests
         // 命令與欄位索引都與讀碼器不同,而且必須互不影響
         // Its command and its indexes both differ from the reader's, and neither may leak into the
         // other.
-        await using var server = new FakeNonProtocolServer(_ => ["OK,LOT26A,2026-08-25"]);
+        await using var server = new FakeNonProtocolServer(_ => ["LOT26A,2026-08-26"]);
         await using var verifier = new Iv4CharacterVerifier(VerifierOptions(server.Port));
 
         await verifier.ConnectAsync(CancellationToken.None);
         var regions = await verifier.TriggerAsync(CancellationToken.None);
 
         Assert.Equal(["T1"], server.Commands());
-        Assert.Equal(["LOT26A", "2026-08-25"], regions.Select(r => r.Text));
+        Assert.Equal(["LOT26A", "2026-08-26"], regions.Select(r => r.Text));
     }
 
     // ── 兩台一起 / Both at once ──────────────────────────────────────────────
@@ -129,8 +134,8 @@ public sealed class NonProtocolSensorTests
         // This is what the architecture change is for: two devices, two addresses, two links, two
         // triggers. The previous driver bound both roles to one object on one link, leaving the
         // second device nowhere to attach.
-        await using var readerServer = new FakeNonProtocolServer(_ => ["OK,ABC123456789,88,,"]);
-        await using var verifierServer = new FakeNonProtocolServer(_ => ["OK,LOT26A,2026-08-25"]);
+        await using var readerServer = new FakeNonProtocolServer(_ => ["2132030090A0S6X10683:3.0"]);
+        await using var verifierServer = new FakeNonProtocolServer(_ => ["LOT26A,2026-08-26"]);
 
         await using var reader = new SrX300CodeReader(ReaderOptions(readerServer.Port));
         await using var verifier = new Iv4CharacterVerifier(VerifierOptions(verifierServer.Port));
@@ -144,8 +149,8 @@ public sealed class NonProtocolSensorTests
         Assert.NotEqual(readerServer.Port, verifierServer.Port);
         Assert.Equal(["LON"], readerServer.Commands());
         Assert.Equal(["T1"], verifierServer.Commands());
-        Assert.Equal("ABC123456789", Assert.Single(codes).Data);
-        Assert.Equal(["LOT26A", "2026-08-25"], regions.Select(r => r.Text));
+        Assert.Equal("2132030090A0S6X10683", Assert.Single(codes).Data);
+        Assert.Equal(["LOT26A", "2026-08-26"], regions.Select(r => r.Text));
     }
 
     // ── 連線與生命週期 / Link and lifetime ───────────────────────────────────
@@ -155,7 +160,7 @@ public sealed class NonProtocolSensorTests
     {
         // 重複連線會白丟掉現有連線,並在現場留下一條半開的 socket
         // Reconnecting would discard the live link and leave a half-open socket on the line.
-        await using var server = new FakeNonProtocolServer(_ => ["OK,ABC,90,,"]);
+        await using var server = new FakeNonProtocolServer(_ => ["2132030090A0S6X10683:3.0"]);
         await using var reader = new SrX300CodeReader(ReaderOptions(server.Port));
 
         await reader.ConnectAsync(CancellationToken.None);
@@ -169,7 +174,7 @@ public sealed class NonProtocolSensorTests
     {
         // 組裝根在關機路徑上可能對同一個物件處置多次
         // The composition root may dispose the same object more than once on shutdown.
-        await using var server = new FakeNonProtocolServer(_ => ["OK,ABC,90,,"]);
+        await using var server = new FakeNonProtocolServer(_ => ["2132030090A0S6X10683:3.0"]);
         var reader = new SrX300CodeReader(ReaderOptions(server.Port));
 
         await reader.ConnectAsync(CancellationToken.None);
@@ -180,7 +185,7 @@ public sealed class NonProtocolSensorTests
     [Fact]
     public async Task TriggerAsync_BeforeConnect_IsRejected()
     {
-        await using var server = new FakeNonProtocolServer(_ => ["OK,ABC,90,,"]);
+        await using var server = new FakeNonProtocolServer(_ => ["2132030090A0S6X10683:3.0"]);
         await using var reader = new SrX300CodeReader(ReaderOptions(server.Port));
 
         await Assert.ThrowsAsync<InvalidOperationException>(
@@ -211,7 +216,7 @@ public sealed class NonProtocolSensorTests
     [Fact]
     public async Task TriggerAsync_WhenTheLinkDropsMidResponse_RaisesADeviceFault()
     {
-        await using var server = new FakeNonProtocolServer(_ => ["OK,ABC"], closeAfterResponse: true);
+        await using var server = new FakeNonProtocolServer(_ => ["2132030090A0S6"], closeAfterResponse: true);
         await using var reader = new SrX300CodeReader(ReaderOptions(server.Port));
 
         await reader.ConnectAsync(CancellationToken.None);
@@ -266,7 +271,7 @@ public sealed class NonProtocolSensorTests
         // 兩者的電文長得很像,而欄位索引是各自獨立設定的。
         // With two devices being commissioned at once an unattributed frame log is useless: the
         // frames look alike while their indexes are configured independently.
-        await using var server = new FakeNonProtocolServer(_ => ["OK,ABC123456789,88,,"]);
+        await using var server = new FakeNonProtocolServer(_ => ["2132030090A0S6X10683:3.0"]);
         await using var reader = new SrX300CodeReader(ReaderOptions(server.Port));
 
         RawFrameEventArgs? seen = null;
@@ -276,7 +281,7 @@ public sealed class NonProtocolSensorTests
         await reader.TriggerAsync(CancellationToken.None);
 
         Assert.NotNull(seen);
-        Assert.Equal("OK,ABC123456789,88,,", seen.Frame);
+        Assert.Equal("2132030090A0S6X10683:3.0", seen.Frame);
         Assert.Contains("SR-X300", seen.DeviceName, StringComparison.Ordinal);
     }
 
@@ -306,7 +311,8 @@ public sealed class NonProtocolSensorTests
         // Neither half alone can tell you whether the indexes are right.
         var reader = new SrX300CodeReader(ReaderOptions(9004));
 
-        Assert.Contains("code fields [1 3]", reader.Configuration, StringComparison.Ordinal);
+        Assert.Contains("code at 0", reader.Configuration, StringComparison.Ordinal);
+        Assert.Contains("grade at 1", reader.Configuration, StringComparison.Ordinal);
         Assert.Contains("LON", reader.Configuration, StringComparison.Ordinal);
     }
 }

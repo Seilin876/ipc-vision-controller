@@ -75,9 +75,13 @@
     // answers", indistinguishable from a dead link or an unpowered device.
     "TriggerCommand": "LON",
 
-    // Cr / Lf / CrLf
+    // Cr / Lf / CrLf。實機為 CR,見設定軟體「終端」欄。
+    // The hardware uses CR; see the Terminator row in the setup software.
     "Terminator": "Cr",
-    "FieldDelimiter": ",",
+
+    // 分隔符（附加數據）—— 條碼與其附加資料之間。實機為冒號。
+    // The appended-data delimiter, between a code and its appended items. The hardware uses a colon.
+    "FieldDelimiter": ":",
 
     "ConnectTimeoutMs": 5000,
 
@@ -93,22 +97,62 @@
     "ErrorPrefix": "ER",
 
     // 視為「該欄位沒有結果」的字樣，不分大小寫。空欄位一律視為沒有結果。
-    // Tokens meaning "no result in this field", case-insensitive. An empty field always counts.
+    // 讀不到的那一筆會落在這裡，於是不進結果清單，改由配方的筆數檢查判退 —— 那是漏貼標籤
+    // 唯一會被抓到的地方。請用實機量一次「讀不到」的電文再確認這份清單。
+    // Tokens meaning "no result in this field", case-insensitive; an empty field always counts. A failed
+    // read lands here, stays out of the result list, and is rejected by the recipe's count check — the one
+    // place a missing label is caught. Confirm this list against a real no-read frame.
+    //
+    // 注意：若讀不到時輸出的字樣以 ErrorPrefix 開頭（例如 "ERROR" 之於 "ER"），
+    // 一張漏貼的標籤會被當成設備異常而停線。那時要把 ErrorPrefix 設為 ""（停用），
+    // 並把該字樣列進本清單。
+    // Careful: if the no-read token starts with ErrorPrefix — "ERROR" against "ER", say — one missing label
+    // stops the line as an equipment fault. Set ErrorPrefix to "" to disable that check and list the token
+    // here instead.
     "EmptyTokens": ["NG", "NOREAD", "----"],
 
-    // ── 欄位索引（由 0 起算）/ Field indexes, zero-based ──
-    // 以下數值是「假設」，不是已驗證的事實 —— 請照上面的方法用實機電文校正。
-    // These values are an assumption, not a verified fact. Correct them against a real frame.
+    // ── 電文結構 / Frame structure ──
     //
-    // 條碼內容所在欄位。筆數要與配方的 ExpectedCodeCount 一致。
-    // Fields holding decoded code text; the count should match the recipe's ExpectedCodeCount.
-    "CodeDataFields": [1],
+    // 實機格式（AutoID Terminal 擷取）/ As captured from the hardware:
+    //   2132030090A0S6X10683:-0.0,2132030090A0S6X10685:3.0,2132030090A0S6X10684:3.0[CR]
+    //   └───── 一筆記錄 ──────┘  └───── 一筆記錄 ─────┘
+    //        碼    :    等級      ↑ 記錄分隔符 / record delimiter
+    //
+    // 對應設定軟體「操作模式 → 數據編輯 → 讀取數據格式」那一頁：
+    //   分隔符（附加數據）      → FieldDelimiter
+    //   內部分隔符（讀取多個代碼）→ RecordDelimiter
+    // These map to the reader's own Read data format page: the appended-data delimiter is
+    // FieldDelimiter and the inter-code delimiter is RecordDelimiter.
+    //
+    // 兩者不可相同。填成同一個字元,兩層會塌成一層 —— 碼與等級被當成兩筆條碼,
+    // 筆數變成兩倍,而等級整批消失。程式在啟動時會擋下這種設定。
+    // They must differ: one character for both collapses the two levels, a code and its grade become two
+    // codes, the count doubles and every grade disappears. The program refuses this at startup.
+    "RecordDelimiter": ",",
 
-    // 條碼等級（讀取餘裕度）所在欄位，與 CodeDataFields 逐位對應。
-    // 讀碼器沒有輸出等級就留成空陣列 []，此時 Grade 為 null，配方的等級檢查自然失效。
-    // Grade fields, paired positionally with CodeDataFields. Leave [] when the reader emits no
-    // grade: Grade is then null and the recipe's grade check has nothing to compare.
-    "CodeGradeFields": [2]
+    // 一筆記錄裡條碼的位置。報頭設為「無」時條碼在最前面,所以是 0。
+    // Position of the code within one record. With the header set to none it comes first, so zero.
+    "CodeField": 0,
+
+    // 一筆記錄裡品質等級的位置；不讀等級時填 null。
+    // 附加數據勾選 ISO/IEC 15415（二維）或 15416（一維）後,等級就排在條碼之後那一格。
+    // 兩項可以同時勾選以兼容不同條碼類型,但一次讀取只會輸出其中一種,所以位置固定為 1。
+    // Position of the quality grade within one record, or null to read none. With ISO/IEC 15415 (2D) or
+    // 15416 (1D) ticked in the appended data, the grade sits in the field after the code. Both may be
+    // ticked to cover different symbol types, yet one read emits only one of them, so the position is 1.
+    //
+    // 等級必須設成「數值」輸出,不能用字母。字母（A/B/C/D）無法與配方的整數門檻比較,
+    // 解析後為 null,配方若啟用等級檢查會判退「未輸出品質等級」。
+    // The grade has to be configured as numeric output rather than letters: letters cannot be compared with
+    // the recipe's integer threshold, parse to null, and make a recipe with grade checking enabled reject
+    // with "no grade reported".
+    //
+    // 實測輸出帶小數位（"3.0"),程式會向下取整;「未評估」輸出 -0.0,程式視為「沒有等級」
+    // 而非「等級 0」—— 0 在 ISO 刻度上是最差的合格等級,兩者判退原因不同。
+    // The hardware emits a decimal place ("3.0") and the program floors it. Not-evaluated comes back as
+    // -0.0, which the program treats as no grade rather than grade zero: zero is the worst *valid* grade on
+    // the ISO scale, and the two reject for different reasons.
+    "GradeField": 1
   },
 
   // ── 以下這一段在 IV4 導入之前請整段刪除 / Delete this whole section until the IV4 arrives ──

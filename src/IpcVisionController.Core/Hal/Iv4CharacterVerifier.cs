@@ -20,7 +20,7 @@ public sealed class Iv4CharacterVerifier(Iv4Options options) : NonProtocolSensor
     /// </summary>
     public async Task<IReadOnlyList<CharacterResult>> TriggerAsync(CancellationToken cancellationToken)
     {
-        var fields = await TriggerAndSplitAsync(cancellationToken).ConfigureAwait(false);
-        return CharacterFrameReader.Read(fields, _options);
+        var frame = await TriggerAndReadFrameAsync(cancellationToken).ConfigureAwait(false);
+        return CharacterFrameReader.Read(frame, _options);
     }
 }

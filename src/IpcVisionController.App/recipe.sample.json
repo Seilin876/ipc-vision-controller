@@ -15,10 +15,23 @@
   "BarcodeLength": 12,
 
   // 條碼品質等級下限，null 表示不檢查。
-  // 刻度由感測器決定：SR 系列的讀取餘裕度為 0–100，愈高愈好。
-  // Lower bound on code quality; null disables the check. The scale is the sensor's own —
-  // the SR-series matching level runs 0–100, higher is better.
-  "MinimumCodeGrade": 70,
+  //
+  // 刻度由讀碼器輸出什麼決定，不是固定的 —— 這一格填錯會讓每張標籤都判退，
+  // 或反過來讓等級檢查形同虛設。SR-X300 目前輸出 ISO/IEC 15415 / 15416 印刷品質等級，
+  // 刻度是 0–4（4 最好，對應字母 A；0 對應 F），所以合理的下限是 2 或 3。
+  // 若改成輸出讀取餘裕度那類 0–100 的數值，這裡就要跟著改成 70 之類。
+  // The scale follows whatever the reader emits rather than being fixed, and getting this wrong either
+  // rejects every label or leaves the check doing nothing. The SR-X300 currently emits the ISO/IEC 15415
+  // and 15416 print-quality grade on a 0–4 scale, where 4 is best (letter A) and 0 is F, so a sensible
+  // minimum is 2 or 3. Switch the reader to a 0–100 margin instead and this becomes 70 or so.
+  //
+  // 讀碼器回報「未評估」（輸出 -0.0）時視為沒有等級，不是等級 0 ——
+  // 配方若啟用等級檢查，那一筆會以「未輸出品質等級」判退，而不是「等級 0 太低」。
+  // 兩者都判退，但原因不同：前者要查讀碼器的符號設定，後者才是去調印刷。
+  // A not-evaluated reading (emitted as -0.0) counts as no grade rather than grade zero: with the check
+  // enabled it rejects as "no grade reported" instead of "grade 0 is too low". Both reject, for different
+  // reasons — the first sends someone to the reader's symbol setup, the second to the printer.
+  "MinimumCodeGrade": 2,
 
   // 一次觸發應回報幾個字符檢測區域。IV4 最多 10 個。0 表示本機種不做字符檢測。
   // 只有在感測器程式裡根本沒有 OCR 區域時才填 0，否則每張標籤都會以「區域數不足」判退。

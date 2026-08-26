@@ -26,8 +26,8 @@ public sealed class DeviceSettingsTests : IDisposable
         Host = "192.168.1.10",
         Port = 9004,
         TriggerCommand = "LON",
-        CodeDataFields = [1],
-        CodeGradeFields = [2],
+        CodeField = 0,
+        GradeField = 1,
     };
 
     private static Iv4Options ValidVerifier() => new()
@@ -35,7 +35,7 @@ public sealed class DeviceSettingsTests : IDisposable
         Host = "192.168.1.11",
         Port = 8500,
         TriggerCommand = "T1",
-        CharacterTextFields = [1, 2],
+        CharacterTextFields = [0, 1],
     };
 
     // ── 連線層的共用檢查 / Checks shared by both devices ─────────────────────
@@ -102,23 +102,33 @@ public sealed class DeviceSettingsTests : IDisposable
     }
 
     [Fact]
-    public void Describe_NamesTheDeviceAndEveryFieldList()
+    public void Describe_NamesTheDeviceAndEveryPositionInForce()
     {
         // 這行字是操作員唯一能拿來與原始電文對照的東西,而兩台裝置的電文長得很像 ——
-        // 少了型號或位址就無法歸屬,少印一組索引則那一組錯掉就查不出來。
+        // 少了型號或位址就無法歸屬,少印一個位置則那個位置錯掉就查不出來。
         // This line is the only thing an operator can hold against a raw frame, and the two devices'
         // frames look alike: without the model and address it cannot be attributed, and an omitted
-        // index list makes a wrong index in it undiagnosable.
-        var reader = ValidReader();
-        reader.CodeDataFields = [1, 3];
-        reader.CodeGradeFields = [2, 4];
-
-        var description = reader.Describe();
+        // position makes a wrong one undiagnosable.
+        var description = ValidReader().Describe();
 
         Assert.Contains("SR-X300", description, StringComparison.Ordinal);
         Assert.Contains("192.168.1.10:9004", description, StringComparison.Ordinal);
-        Assert.Contains("1 3", description, StringComparison.Ordinal);
-        Assert.Contains("2 4", description, StringComparison.Ordinal);
+        Assert.Contains("LON", description, StringComparison.Ordinal);
+        Assert.Contains("code at 0", description, StringComparison.Ordinal);
+        Assert.Contains("grade at 1", description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Describe_SaysWhenNoGradeIsRead()
+    {
+        // 「不讀等級」與「等級位置填錯」在判定上都會讓等級檢查失效,但只有前者是意圖。
+        // 摘要必須說得出是哪一種,否則現場會以為等級有在檢查。
+        // Not reading a grade and pointing at the wrong position both disable the grade check, but only
+        // the first is intended. The summary has to say which, or the line believes grades are checked.
+        var reader = ValidReader();
+        reader.GradeField = null;
+
+        Assert.Contains("grade at off", reader.Describe(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -134,39 +144,63 @@ public sealed class DeviceSettingsTests : IDisposable
     // ── 讀碼器專屬 / Reader-specific ─────────────────────────────────────────
 
     [Fact]
-    public void Validate_WithNoCodeFields_IsRejected()
+    public void Validate_WithNoRecordDelimiter_IsRejected()
     {
-        // 讀碼器接上了卻沒有指定任何欄位,每次觸發都回空結果,
-        // 配方的筆數檢查會讓每一張標籤都判退 —— 看起來像整批不良,實際上是設定漏填。
-        // A reader that is attached with no field mapped returns nothing on every trigger and the
-        // recipe's count check rejects every label: it looks like a bad batch and is an unfinished
-        // configuration.
+        // 少了記錄分隔符,一次讀到六筆條碼會被當成一整串無法解讀的內容
+        // Without it, six codes in one read arrive as a single unintelligible string.
         var reader = ValidReader();
-        reader.CodeDataFields = [];
+        reader.RecordDelimiter = string.Empty;
 
         Assert.Throws<ArgumentException>(reader.Validate);
     }
 
     [Fact]
-    public void Validate_WithMoreGradeFieldsThanCodeFields_IsRejected()
+    public void Validate_WhenBothDelimitersAreTheSame_IsRejected()
     {
-        // 兩份索引逐位對應,多出來表示已經錯位,等級會掛到別筆條碼上
-        // The lists pair positionally; a surplus means the pairing is out of step and a grade would
-        // attach to the wrong code.
+        // 兩層會塌成一層:碼與等級被當成兩筆條碼,筆數變成兩倍,而等級整批消失。
+        // 這是實機格式最容易填錯的一項,因為兩個分隔符在設定軟體裡是分開的兩欄。
+        // The two levels collapse: a code and its grade become two codes, the count doubles and every
+        // grade disappears. It is the easiest thing to get wrong, because the reader's setup software
+        // holds the two delimiters in two separate fields.
         var reader = ValidReader();
-        reader.CodeDataFields = [1];
-        reader.CodeGradeFields = [2, 3];
+        reader.RecordDelimiter = ",";
+        reader.FieldDelimiter = ",";
 
         Assert.Throws<ArgumentException>(reader.Validate);
     }
 
     [Fact]
-    public void Validate_WithANegativeFieldIndex_IsRejected()
+    public void Validate_WhenTheCodeAndGradeSharePosition_IsRejected()
     {
+        // 其中一個必然填錯了。真接上去的話,等級會從條碼文字解析,而長度檢查讀的是同一格
+        // —— 兩個檢查一起壞掉,卻不會有任何錯誤訊息。
+        // One of them is certainly wrong. Left in place, the grade parses from the code text while the
+        // length check reads the same field: two checks broken at once, with no error anywhere.
         var reader = ValidReader();
-        reader.CodeDataFields = [-1];
+        reader.CodeField = 0;
+        reader.GradeField = 0;
 
         Assert.Throws<ArgumentException>(reader.Validate);
+    }
+
+    [Fact]
+    public void Validate_WithANegativePosition_IsRejected()
+    {
+        var reader = ValidReader();
+        reader.CodeField = -1;
+
+        Assert.Throws<ArgumentException>(reader.Validate);
+    }
+
+    [Fact]
+    public void Validate_WithNoGradeField_Passes()
+    {
+        // 不讀等級是合法的組態 —— 讀碼器可以完全關掉附加數據
+        // Reading no grade is a legal configuration: appended data can be switched off entirely.
+        var reader = ValidReader();
+        reader.GradeField = null;
+
+        reader.Validate();
     }
 
     // ── 字符檢測器專屬 / Verifier-specific ───────────────────────────────────
@@ -248,7 +282,7 @@ public sealed class DeviceSettingsTests : IDisposable
                 "Port": 9004,
                 "TriggerCommand": "LON",
                 "Terminator": "CrLf",
-                "CodeDataFields": [1],
+                "CodeField": 0,
               },
             }
             """);
@@ -279,7 +313,7 @@ public sealed class DeviceSettingsTests : IDisposable
                 "Host": "192.168.1.10",
                 "Port": 9004,
                 "TriggerCommand": "LON",
-                "CodeDataFields": [1]
+                "CodeField": 0
               }
             }
             """);
@@ -305,7 +339,7 @@ public sealed class DeviceSettingsTests : IDisposable
                 "Host": "192.168.1.10",
                 "Port": 9004,
                 "TriggerCommand": "LON",
-                "CodeDataFields": [1]
+                "CodeField": 0
               }
             }
             """);
@@ -336,7 +370,7 @@ public sealed class DeviceSettingsTests : IDisposable
         // that looks filled in — sending the diagnosis the wrong way. Name the change.
         var path = Path.Combine(_workspace.Root, "device.json");
         await File.WriteAllTextAsync(path, """
-            { "Host": "192.168.1.10", "Port": 8500, "CodeDataFields": [1] }
+            { "Host": "192.168.1.10", "Port": 8500, "CodeField": 0 }
             """);
 
         var error = await Assert.ThrowsAsync<ArgumentException>(() => DeviceSettings.LoadAsync(path));
