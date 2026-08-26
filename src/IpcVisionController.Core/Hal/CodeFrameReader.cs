@@ -38,9 +38,9 @@ public static class CodeFrameReader
         var records = frame.Split(options.RecordDelimiter);
         var codes = new List<CodeResult>(records.Length);
 
-        foreach (var record in records)
+        for (var position = 0; position < records.Length; position++)
         {
-            var fields = record.Split(options.FieldDelimiter);
+            var fields = records[position].Split(options.FieldDelimiter);
             var data = NonProtocolFrame.FieldOrNull(fields, options.CodeField, options);
 
             // 解不出來的條碼根本不進結果清單,而不是回一筆空的 —— 與讀碼器本身的語意一致,
@@ -53,12 +53,22 @@ public static class CodeFrameReader
                 continue;
             }
 
-            // Index 用結果清單目前的長度,而非它在電文裡的第幾筆 —— 追溯紀錄要的是
-            // 「這次讀到的第幾筆」,不是「它躺在電文的第幾段」。
-            // Index is the position in the result list rather than in the frame: a traceability record
-            // wants "the nth code read", not "the nth segment of the message".
+            // Index 用「它在電文裡的第幾段」,而不是結果清單目前的長度。
+            //
+            // 讀碼器的輸出順序就是標籤的物理順序（同一次進給有數張標籤同時在視野內),
+            // 所以這個數字是操作員唯一能用來指認「是哪一道、哪一張」的東西。
+            // 若改用結果清單的長度,任何一張讀不到都會讓後面每一個編號往前位移一格 ——
+            // 判退原因寫「條碼 #3」而實際上是第 4 張,操作員會挑錯標籤。
+            // 缺號反而是有用的資訊:它直接指出是哪一段沒有讀到。
+            // Index is the record's position in the frame rather than the length of the result list. The
+            // reader emits codes in the labels' physical order — several labels sit in the field of view for
+            // one feed — so this number is the only thing an operator can use to identify which one. Using
+            // the list length instead would shift every later number down by one whenever a label failed to
+            // read: a reject naming code #3 would really be the fourth label, and the wrong one gets
+            // pulled. A gap is the more useful outcome, because it points straight at the position that did
+            // not read.
             codes.Add(new CodeResult(
-                Index: codes.Count,
+                Index: position,
                 Data: data,
                 Grade: ReadGrade(fields, options),
                 Judge: Verdict.Pass));

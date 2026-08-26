@@ -183,7 +183,38 @@ public sealed class FrameReaderTests
             Clean("2132030090A0S6X10683:3.0,NOREAD:-0.0,2132030090A0S6X10685:4.0", options), options);
 
         Assert.Equal(2, codes.Count);
-        Assert.Equal([0, 1], codes.Select(c => c.Index));
+    }
+
+    [Fact]
+    public void Codes_KeepTheirPositionInTheFrameSoAMissingOneLeavesAGap()
+    {
+        // 讀碼器的輸出順序就是標籤的物理順序 —— 同一次進給有數張標籤同時在視野內,
+        // 所以編號是操作員唯一能用來指認「是哪一道」的東西。
+        // 中間那一段讀不到時,編號必須留下缺號（0 與 2),不能重新編成 0 與 1:
+        // 後者會讓判退原因寫「條碼 #1」而實際上是第 3 張,操作員挑錯標籤。
+        // The reader emits codes in the labels' physical order — several labels are in view for one feed —
+        // so the number is the only thing an operator can use to identify which one. With the middle record
+        // unread the numbers have to keep a gap, 0 and 2, rather than being renumbered 0 and 1: the latter
+        // makes a reject naming code #1 really the third label, and the wrong one gets pulled.
+        var options = Reader();
+        var codes = CodeFrameReader.Read(
+            Clean("2132030090A0S6X10683:3.0,NOREAD:-0.0,2132030090A0S6X10685:4.0", options), options);
+
+        Assert.Equal([0, 2], codes.Select(c => c.Index));
+    }
+
+    [Fact]
+    public void Codes_WithTheFirstRecordMissing_StillNumberTheRestFromTheirOwnPositions()
+    {
+        // 第一段讀不到是最容易掩蓋位移錯誤的情形:重新編號的話,第 2 張會拿到編號 0,
+        // 而「條碼 #0」在現場一律被讀成「第一張」。
+        // A missing first record is the case most likely to hide a shift: renumbered, the second label takes
+        // number 0, and on the line "code #0" is always read as the first one.
+        var options = Reader();
+        var codes = CodeFrameReader.Read(
+            Clean("NOREAD:-,2132030090A0S6X10685:4.0", options), options);
+
+        Assert.Equal([1], codes.Select(c => c.Index));
     }
 
     [Fact]
