@@ -90,8 +90,11 @@ public sealed class FrameReaderTests
             ],
             codes.Select(c => c.Data));
 
-        // Index 是「這次讀到的第幾筆」,而非它躺在電文的第幾段
-        // Index is the nth code read, not the nth segment of the message.
+        // Index 是「它躺在電文的第幾段」,而電文順序就是標籤的物理順序。
+        // 六段都讀到時編號連續;有一段讀不到就會留缺號,見下面兩項。
+        // Index is the record's position in the frame, and the frame's order is the labels' physical order.
+        // With all six read the numbers run consecutively; an unread record leaves a gap, as the two cases
+        // below show.
         Assert.Equal([0, 1, 2, 3, 4, 5], codes.Select(c => c.Index));
     }
 
@@ -228,6 +231,49 @@ public sealed class FrameReaderTests
         Assert.Empty(codes);
     }
 
+    [Fact]
+    public void Codes_WithTheHardwareNoReadToken_RejectRatherThanStoppingTheLine()
+    {
+        // 實機讀不到時輸出 "ERROR",而遮住六張中的一張與遮住全部六張輸出相同 ——
+        // 所以這是每批都會遇到的常態,不是例外。
+        // 它以 "ER" 開頭,若沿用基底的 ErrorPrefix 就會被判成設備異常而停線;
+        // SrX300Options 因此預設停用 ErrorPrefix 並把 "ERROR" 列入 EmptyTokens。
+        // 這一項守的正是那個預設:改回去,產線會在每一張漏貼的標籤上停下來。
+        // The hardware emits "ERROR" on a failed read, and covering one of six labels produces the same
+        // output as covering all six, so this is routine rather than exceptional. It starts with "ER", so
+        // the base ErrorPrefix would make it an equipment fault and stop the line; SrX300Options therefore
+        // disables the prefix by default and lists "ERROR" in EmptyTokens. This case guards that default:
+        // revert it and the line halts on every missing label.
+        var options = new SrX300Options
+        {
+            Host = "192.168.1.10",
+            Port = 9004,
+            TriggerCommand = "LON",
+            CodeField = 0,
+            GradeField = 1,
+        };
+
+        var codes = CodeFrameReader.Read(Clean("ERROR", options), options);
+
+        Assert.Empty(codes);
+    }
+
+    [Fact]
+    public void ReaderDefaults_MatchTheMeasuredHardware()
+    {
+        // 這些預設值是量出來的,不是猜的。設定檔省略任何一項時,剩下的必須仍然對得上實機 ——
+        // 否則現場會拿到一個「看起來填好了」卻與裝置不符的組態。
+        // These defaults were measured rather than guessed. With any of them omitted from the settings file
+        // the rest must still match the hardware, or the line ends up with a configuration that looks
+        // complete and does not fit the device.
+        var options = new SrX300Options();
+
+        Assert.Equal(":", options.FieldDelimiter);
+        Assert.Equal(",", options.RecordDelimiter);
+        Assert.Equal(string.Empty, options.ErrorPrefix);
+        Assert.Contains("ERROR", options.EmptyTokens);
+    }
+
     // ── 共通處理 / Handling common to every device ──────────────────────────
 
     [Fact]
@@ -251,7 +297,15 @@ public sealed class FrameReaderTests
         // An error frame is shaped differently and forcing it through yields "nothing read", an equipment
         // fault misreported as one bad label. The message names the device: the two devices' messages
         // interleave, and an unattributed fault cannot say which one to go and look at.
-        var error = Assert.Throws<DeviceFaultException>(() => Clean("ER,03", Reader()));
+        // 讀碼器預設停用 ErrorPrefix（實機的 "ERROR" 是 no-read,不是設備異常),
+        // 所以要驗這個機制本身,必須明確設定一個開頭。機制仍然存在,只是不再套用於這台裝置。
+        // The reader disables ErrorPrefix by default, because the hardware's "ERROR" is a no-read rather than
+        // an equipment fault, so exercising the mechanism means configuring a prefix explicitly. It still
+        // exists; it simply no longer applies to this device.
+        var options = Reader();
+        options.ErrorPrefix = "ER";
+
+        var error = Assert.Throws<DeviceFaultException>(() => Clean("ER,03", options));
 
         Assert.Contains("ER,03", error.Message, StringComparison.Ordinal);
         Assert.Contains(Device, error.Message, StringComparison.Ordinal);

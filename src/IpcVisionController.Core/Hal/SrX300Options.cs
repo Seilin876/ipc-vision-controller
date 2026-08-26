@@ -38,14 +38,39 @@ namespace IpcVisionController.Core.Hal;
 public sealed class SrX300Options : NonProtocolLinkOptions
 {
     /// <summary>
-    /// 預設值取自讀碼器出廠的讀取數據格式 / Defaults taken from the reader's own read-data format.
-    /// 基底類別的分隔字元預設是逗號,而讀碼器用來隔開附加數據的是冒號 —— 在此改掉,
-    /// 讓沒填這一項的設定檔仍然對得上實機,而不是靠驗證去攔一個必然的漏填。
-    /// The base class defaults its delimiter to a comma, while the reader separates appended data with a
-    /// colon. Correcting it here means a settings file that omits the field still matches the hardware,
-    /// rather than relying on validation to catch an omission that was always going to happen.
+    /// 預設值取自實機實測 / Defaults measured from the hardware.
+    ///
+    /// 分隔字元 / The delimiter:
+    /// 基底類別預設逗號,而讀碼器用來隔開附加數據的是冒號。
+    /// The base class defaults to a comma; the reader separates appended data with a colon.
+    ///
+    /// 為什麼停用 ErrorPrefix / Why ErrorPrefix is disabled:
+    /// SR-X300 讀不到時輸出 "ERROR",而它以 "ER" 開頭。沿用基底的 ErrorPrefix,
+    /// 「一張標籤漏貼」就會被判成設備異常而停線 —— 而那應該是判退後繼續生產。
+    /// 實測遮住六張中的一張、與遮住全部六張,輸出都是 "ERROR",所以這是每批都會遇到的常態,
+    /// 不是例外。停用之後 "ERROR" 由 EmptyTokens 接住,成為「這一格沒有結果」,
+    /// 於是條碼不進清單,改由配方的筆數檢查判退。
+    /// The SR-X300 emits "ERROR" on a failed read, and that starts with "ER". Keeping the base prefix would
+    /// turn one missing label into an equipment fault and stop the line, when it should be a reject and
+    /// carry on. In practice covering one of six labels and covering all six both produce "ERROR", so this
+    /// is routine rather than exceptional. Disabled, "ERROR" is caught by EmptyTokens as "no result in this
+    /// field", the code stays out of the list, and the recipe's count check does the rejecting.
+    ///
+    /// 代價 / The cost:
+    /// 停用之後,讀碼器若另有一種真正的設備異常電文,那筆也會被當成「沒讀到」而判退,
+    /// 不會停線。那是刻意的取捨:「漏貼標籤就停線」是每批都會發生的確定損失,
+    /// 而「另有一種未知的異常字樣」目前只是推測。若日後量到那個字樣,把它填進 ErrorPrefix 即可。
+    /// Disabled, a genuine device-fault frame — if the reader has one — would also read as a failed read and
+    /// reject rather than stop. That is a deliberate trade: stopping the line on a missing label is a
+    /// certain, recurring loss, while a distinct fault string is at this point only a supposition. Should
+    /// one be measured later, putting it in ErrorPrefix restores the behaviour.
     /// </summary>
-    public SrX300Options() => FieldDelimiter = ":";
+    public SrX300Options()
+    {
+        FieldDelimiter = ":";
+        ErrorPrefix = string.Empty;
+        EmptyTokens = ["ERROR", "NG", "NOREAD", "----"];
+    }
 
     /// <inheritdoc />
     protected override string Model => "Keyence SR-X300";

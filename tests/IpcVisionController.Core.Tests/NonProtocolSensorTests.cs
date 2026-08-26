@@ -290,8 +290,14 @@ public sealed class NonProtocolSensorTests
     {
         // 解析失敗時,現場最需要看到的正是那筆解不開的電文
         // When parsing fails, the frame that broke it is precisely what the line needs to see.
+        // 需要一筆「解析會失敗」的電文才能證明事件在解析之前引發。
+        // 讀碼器預設停用 ErrorPrefix,所以此處明確設定一個,讓這筆電文確實解不過。
+        // Proving the event fires before parsing needs a frame that fails to parse. The reader disables
+        // ErrorPrefix by default, so one is configured here to make this frame genuinely fail.
         await using var server = new FakeNonProtocolServer(_ => ["ER,03"]);
-        await using var reader = new SrX300CodeReader(ReaderOptions(server.Port));
+        var options = ReaderOptions(server.Port);
+        options.ErrorPrefix = "ER";
+        await using var reader = new SrX300CodeReader(options);
 
         RawFrameEventArgs? seen = null;
         reader.RawFrameReceived += (_, e) => seen = e;
