@@ -85,11 +85,28 @@
 
     "ConnectTimeoutMs": 5000,
 
-    // 要比協調器的讀碼逾時（預設 3 秒）明顯短。兩層逾時同時到期時，
-    // 現場會隨機拿到兩種訊息之一，而只有裝置層那句說得出是哪一台沒回應。
-    // Keep this comfortably shorter than the sequencer's 3-second read timeout: when both expire
-    // together the line gets one of two messages at random, and only the device-level one names
-    // the device that went silent.
+    // 逾時有三層，順序必須是「讀碼器 < 本項 < 協調器」：
+    //   讀碼器端的讀取時限   最短 —— 讀不到就回答，讓它變成一次判退
+    //   ResponseTimeoutMs   中間 —— 裝置真的沉默才觸發，訊息說得出是哪一台
+    //   CodeReadTimeout     最長（程式內建 3 秒）
+    // There are three timeouts and the order has to be reader, then this, then the sequencer:
+    //   the reader's own read limit is shortest, so a failed read is answered and becomes a reject;
+    //   ResponseTimeoutMs fires only when the device is genuinely silent, and names it;
+    //   CodeReadTimeout, three seconds in code, is the outermost guard.
+    //
+    // 為什麼讀碼器那一層不能省：沒有標籤時 SR-X300 不回應，它會一直等到讀到東西為止。
+    // 讀碼器沒有時限的話，「一張標籤漏貼」會走到本項逾時 → 設備故障 → 停線，
+    // 而那應該是判退後繼續生產。實測就是這樣停下來的。
+    // Why the reader's limit cannot be skipped: with no label present the SR-X300 does not answer at all,
+    // it waits until it reads something. Without a limit there, one missing label reaches this timeout,
+    // becomes an equipment fault and stops the line — when it should be a reject and carry on. That is
+    // exactly how the line stopped in practice.
+    //
+    // 本程式刻意不把「裝置逾時」改判成不良品：真的沉默的裝置就是設備問題（斷線、沒開機、
+    // 命令錯），當成不良品會讓斷線被記成一批壞標籤。要分辨兩者，只能靠讀碼器主動回答。
+    // This program deliberately does not reclassify a device timeout as a bad part: a genuinely silent
+    // device is an equipment problem — a dropped link, no power, the wrong command — and calling it a bad
+    // part would log a dead link as a batch of defects. Only the reader answering can tell them apart.
     "ResponseTimeoutMs": 2000,
 
     // 以此開頭的電文視為裝置自身異常 → 停線，不會被記成一張不良標籤。
