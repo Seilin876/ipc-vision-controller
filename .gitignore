@@ -38,3 +38,22 @@ device.json
 # Windows' Thumbs.db is already covered by the *.db rule above; not repeated here.
 .DS_Store
 desktop.ini
+
+# 廠商 SDK 與參考資料：不進版控 /
+# Vendor SDK and reference material: not versioned.
+#
+# EtherCAT/ 是台達的 SDK（DLL、.lib、Windows 驅動 .sys、手冊 PDF，約數 MB)。
+# 那不是本專案的程式碼,而且把 Windows 驅動檔提交進 repo 不是好做法。
+# 實作進給軸驅動時,只會把 C# 綁定那一個「原始碼」檔案（EtherCAT_DLL_x64.cs）納入,
+# 執行期則依賴現場已安裝的 SDK。
+# EtherCAT/ holds Delta's SDK — DLLs, .lib files, Windows .sys drivers and manual PDFs, several megabytes.
+# None of it is this project's code, and committing Windows drivers into a repository is poor practice. When
+# the feed-axis driver is written, only the C# binding source file will be taken in, with the installed SDK
+# supplying the runtime.
+EtherCAT/
+
+# 導入期間的畫面與設定截圖 / Screenshots taken during commissioning.
+# 有保留價值的請移到 docs/ 並在 README 引用,散在根目錄的當作暫存檔。
+# Worth keeping ones belong in docs/ and referenced from the README; loose ones at the root are scratch.
+截圖*.png
+PCI-L221B1D0*.png

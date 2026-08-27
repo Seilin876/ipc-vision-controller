@@ -25,7 +25,15 @@ public interface IDevice : IAsyncDisposable
 }
 
 /// <summary>
-/// 標籤紙進給軸 / The label-web feed axis (Delta R1-EC5500D1 EtherCAT stepper drive).
+/// 標籤紙進給軸 / The label-web feed axis.
+///
+/// 實機是開環脈波輸出,不是伺服軸 / Open-loop pulse output rather than a servo axis:
+///   工控機 → PCI-L221B1D0 主站卡 → R1-EC5500D1 耦合器 → R1-EC5621D1 脈波輸出模組
+///          → Misumi DR57A 步進驅動器 → C-57STM04 步進馬達
+/// 沒有編碼器回授,所以本介面的「位置」一律指「已命令的脈波數」,不是量到的距離。
+/// 失步與料帶滑動不會被任何回授修正 —— 誤差只會累加,見 README 的「位置偏移」一節。
+/// With no encoder feedback, every position on this interface means pulses commanded rather than distance
+/// measured. Lost steps and web slip go uncorrected and the error only accumulates; see the README.
 ///
 /// 為什麼是相對進給而非絕對定位 / Why relative feed rather than absolute positioning:
 /// 標籤紙是連續料帶,沒有「第 25000 脈波」這種有意義的絕對位置 —— 只有「再捲一格」。
@@ -48,17 +56,28 @@ public interface IMotorController : IDevice
     bool IsInPosition { get; }
 
     /// <summary>
-    /// 伺服致能 / Enable the drive.
-    /// 實機：走 CiA402 狀態機 Shutdown → Switch On → Enable Operation。
-    /// Real hardware: walk the CiA402 state machine Shutdown → Switch On → Enable Operation.
+    /// 致能驅動器 / Enable the drive.
+    /// 實機是讓脈波模組把致能訊號輸出給步進驅動器（SDK 的 Set_Svon)——
+    /// 步進驅動器沒有 CiA402 狀態機,所以這裡沒有狀態轉移要等。
+    /// On real hardware this drives the pulse module's enable output to the stepper driver via the SDK's
+    /// Set_Svon. A stepper driver has no CiA402 state machine, so there is no transition to wait on.
     /// </summary>
     Task EnableAsync(CancellationToken cancellationToken);
 
     /// <summary>
-    /// 對齊定位標記並歸零累計量 / Align to the registration mark and zero the feed counter.
-    /// 料帶沒有機械原點,所謂復歸是「捲到下一個定位標記」;此處歸零只是讓累計量重新起算。
-    /// A web has no mechanical home; "homing" means winding to the next registration mark.
-    /// Zeroing here merely restarts the accumulated count.
+    /// 歸零累計量 / Zero the feed counter.
+    ///
+    /// 料帶沒有機械原點,所以這裡不是「回到某個位置」,而只是讓累計量重新起算。
+    /// 本機構「沒有」定位標記感測器,因此實機實作只會把脈波計數歸零,不會對齊任何東西 ——
+    /// 訊息與文件都不該聲稱對齊發生了。
+    /// A web has no mechanical home, so this is not a move to a position but a restart of the count. This
+    /// mechanism has no registration-mark sensor, so a real implementation only zeroes the pulse counter and
+    /// aligns nothing; neither the log nor the documentation should claim otherwise.
+    ///
+    /// 日後若加上標記感測器,這個方法才會變成「進給到下一個標記為止」,
+    /// 屆時每一格都能歸零累積誤差。目前沒有,所以進給是純開環。
+    /// Should a mark sensor be added later, this becomes "feed until the next mark" and each pitch can clear
+    /// the accumulated error. Without one the feed is purely open-loop.
     /// </summary>
     Task HomeAsync(CancellationToken cancellationToken);
 
@@ -69,7 +88,17 @@ public interface IMotorController : IDevice
     /// <param name="speedPulsePerSecond">速度（脈波/秒）/ Profile velocity in pulses per second (0x6081).</param>
     Task FeedAsync(int stepPulses, int speedPulsePerSecond, CancellationToken cancellationToken);
 
-    /// <summary>立即停止 / Quick stop (control word bit 2).</summary>
+    /// <summary>
+    /// 停止進給 / Stop feeding.
+    ///
+    /// 實機用減速停止,不用立即停止 / Decelerating rather than immediate on real hardware:
+    /// 開環步進被立即切斷脈波會失步,而失步之後脈波計數與料帶的實際位置就不再一致 ——
+    /// 沒有回授可以發現這件事,也沒有標記感測器可以修正它。
+    /// 減速停止慢一點,但停完之後計數仍然可信。
+    /// Cutting the pulse train dead makes an open-loop stepper lose steps, and once steps are lost the count
+    /// no longer matches where the web is — with no feedback to notice and no mark sensor to correct it. A
+    /// decelerating stop is slower and leaves the count trustworthy.
+    /// </summary>
     Task StopAsync(CancellationToken cancellationToken);
 }
 

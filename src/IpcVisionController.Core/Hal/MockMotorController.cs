@@ -1,25 +1,60 @@
 namespace IpcVisionController.Core.Hal;
 
 /// <summary>
-/// 標籤紙進給軸的模擬實作 / Mock for the label-web feed axis (Delta R1-EC5500D1).
+/// 標籤紙進給軸的模擬實作 / Mock for the label-web feed axis.
 ///
-/// 換成實機時要替換的位置 / What to replace for real hardware:
-/// - ConnectAsync：初始化 EtherCAT 主站（例如 SOEM / Delta DIALink SDK）,
-///   掃描從站、設定 PDO 對應、切至 OP 狀態。
-///   ConnectAsync: bring up the EtherCAT master (SOEM / Delta DIALink SDK), scan the
-///   slaves, map the PDOs, transition to OP.
-/// - FeedAsync：CiA402 Profile Position 模式,控制字 0x6040 bit 6 設為「相對」,
-///   寫入 0x607A(進給量) 與 0x6081(速度),下 New Set-point,
-///   再輪詢狀態字 0x6041 bit 10 (Target Reached) 判定到位。
-///   FeedAsync: CiA402 Profile Position with control word 0x6040 bit 6 set for a
-///   relative target; write 0x607A (distance) and 0x6081 (velocity), raise the
-///   new-set-point bit, then poll status word 0x6041 bit 10 (Target Reached).
-/// - HomeAsync：實機是「進給到下一個定位標記」,由光電感測器的邊緣訊號觸發
-///   Touch Probe (0x60B8) latch —— 不是 CiA402 原點復歸模式,
-///   那個模式假設有機械原點,而料帶沒有。
-///   HomeAsync: on real hardware this is "feed until the next registration mark",
-///   latched from the mark sensor's edge via touch probe (0x60B8). It is *not* CiA402
-///   homing mode, which presumes a mechanical home the web does not have.
+/// 實機拓樸 / The real topology:
+///   工控機 → PCI-L221B1D0（EtherCAT 主站卡）→ R1-EC5500D1（EtherCAT 耦合器）
+///          → R1-EC5621D1（脈波輸出模組）→ Misumi DR57A（步進驅動器）→ C-57STM04（步進馬達）
+///   IPC → PCI-L221B1D0 master card → R1-EC5500D1 coupler → R1-EC5621D1 pulse-output module
+///        → Misumi DR57A stepper driver → C-57STM04 stepper motor.
+///
+/// 這不是伺服軸,是開環脈波輸出 / This is not a servo axis but open-loop pulse output:
+/// 模組只知道自己送出了幾個脈波,不知道馬達實際走了多少 —— 沒有編碼器回授。
+/// 因此「位置」的意思是「已命令的脈波數」,而不是「量到的位置」。
+/// 失步、料帶滑動、印刷間距與設定值的差異,都不會被任何回授修正。
+/// The module knows how many pulses it emitted, not how far the motor turned: there is no encoder
+/// feedback. "Position" therefore means pulses commanded rather than distance measured, and lost steps, web
+/// slip and any mismatch between the printed pitch and the configured pulse count go uncorrected.
+///
+/// 換成實機時的對應 / What the real implementation calls (Delta EtherCAT SDK, CS_ECAT_* 前綴):
+/// - ConnectAsync：CS_ECAT_Master_Open → Master_Get_CardSeq → Master_Initial,
+///   再輪詢 Master_Check_Initial_Done,最後 Master_Get_SlaveNum 確認從站在線。
+///   軸的定位方式是 (CardNo, NodeID, SlotNo) —— NodeID 是耦合器,SlotNo 是脈波模組的插槽。
+///   ConnectAsync: Master_Open, Get_CardSeq, Master_Initial, poll Check_Initial_Done, then
+///   Get_SlaveNum. An axis is addressed by card, node and slot: the node is the coupler and the slot is
+///   the pulse module.
+/// - EnableAsync：CS_ECAT_Slave_Motion_Set_Svon(On_Off = 1),必要時先 Slave_Motion_Ralm 清警報。
+///   步進驅動器沒有 CiA402 狀態機,這一步實際上是讓模組把致能訊號輸出給 DR57A。
+///   EnableAsync: Set_Svon, preceded by Ralm to clear an alarm if needed. A stepper driver has no CiA402
+///   state machine; this drives the module's enable output to the DR57A.
+/// - FeedAsync：CS_ECAT_Slave_PP_Start_Move(..., TargetPos, ConstVel, Acceleration, Deceleration,
+///   Abs_Rel = 相對),再輪詢 Slave_Motion_Get_Mdone 判定到位。
+///   FeedAsync: PP_Start_Move with the relative flag, then poll Get_Mdone for completion.
+/// - HomeAsync：本機構「沒有」定位標記感測器,所以不做對齊,只以
+///   CS_ECAT_Slave_Motion_Set_Position(0) 把脈波計數歸零。
+///   HomeAsync: this mechanism has no registration-mark sensor, so nothing is aligned; it only zeroes the
+///   pulse counter with Set_Position(0).
+/// - StopAsync：CS_ECAT_Slave_Motion_Sd_Stop（減速停止),不是 Emg_Stop。
+///   開環步進被立即停止會失步,而失步之後脈波計數與料帶實際位置就不再一致。
+///   StopAsync: Sd_Stop, decelerating, rather than Emg_Stop. An immediate stop makes an open-loop stepper
+///   lose steps, and once steps are lost the pulse count no longer matches where the web actually is.
+/// - CurrentPosition：CS_ECAT_Slave_Motion_Get_Position。
+///   注意 SDK 的位置是 int（32 位元),而本介面宣告 long —— 沒有定位標記可週期性歸零時,
+///   計數只會單向累加,約 21 億脈波後溢位。實機實作必須在軟體端以 long 累計並處理模組計數繞回。
+///   CurrentPosition: Get_Position. Note the SDK's position is a 32-bit int while this interface exposes a
+///   long: with no mark sensor to re-zero against, the count only ever grows and wraps after about 2.1
+///   billion pulses, so a real implementation has to accumulate in software and handle the wrap.
+///
+/// 介面沒有表達的東西 / What the interface does not carry:
+/// PP_Start_Move 需要加減速度,而 FeedAsync 只收「脈波數」與「速度」。
+/// 加減速對開環步進是關鍵參數 —— 加速太急就失步 —— 但它屬於「這台機構長怎樣」,
+/// 不屬於每次呼叫。實機實作應由自己的設定（device.json 的 FeedAxis 段）提供,
+/// 而不是加進介面。
+/// PP_Start_Move needs acceleration and deceleration, which FeedAsync does not take. They matter greatly
+/// for an open-loop stepper — too aggressive and it loses steps — but they describe the mechanism rather
+/// than any single call, so a real implementation should take them from its own settings section rather
+/// than widening the interface.
 ///
 /// 模擬方式：以固定週期累加進給量,讓 UI 看得到料帶在走,且每個 await 都吃取消權杖。
 /// The mock accumulates feed on a fixed cycle so the UI sees the web moving, and every
@@ -42,7 +77,7 @@ public sealed class MockMotorController : IMotorController
 
     private bool _isInPosition = true;
 
-    public string Name => "Delta R1-EC5500D1 (MOCK)";
+    public string Name => "進給軸 / feed axis (MOCK)";
 
     public bool IsConnected { get; private set; }
 

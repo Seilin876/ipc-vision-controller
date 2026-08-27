@@ -220,9 +220,17 @@ public sealed class InspectionSequencer : IAsyncDisposable
                 "伺服致能 / servo enable", _options.ConnectTimeout,
                 _motor.EnableAsync, cancellationToken).ConfigureAwait(false);
 
-            Log("對齊定位標記 / Aligning to the registration mark…");
+            // 這裡刻意不說「對齊」/ Deliberately does not say "aligning":
+            // 本機構沒有定位標記感測器,進給軸復歸實際上只是把脈波計數歸零,沒有對齊任何東西。
+            // 訊息若寫「對齊定位標記」,那是在畫面上宣稱一件沒有發生的事 ——
+            // 而現場會因此相信位置是被校正過的,那正是最不該被誤導的一件事。
+            // This mechanism has no registration-mark sensor: homing the feed axis only zeroes the pulse
+            // counter and aligns nothing. A message claiming an alignment would assert on screen something
+            // that did not happen, leaving the line believing the position had been corrected — the very
+            // thing it must not be misled about.
+            Log("進給軸歸零 / Zeroing the feed axis…");
             await WithTimeoutAsync(
-                "對標 / registration align", _options.FeedTimeout,
+                "進給軸歸零 / feed axis zero", _options.FeedTimeout,
                 _motor.HomeAsync, cancellationToken).ConfigureAwait(false);
 
             await _database.InitializeAsync(cancellationToken).ConfigureAwait(false);
