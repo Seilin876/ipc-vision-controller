@@ -25,8 +25,22 @@ internal sealed class MainForm : Form
     /// <summary>畫面更新週期；快到看得出動作,慢到不吃滿 CPU / Refresh period: fast enough to look live, slow enough to stay cheap.</summary>
     private static readonly TimeSpan RefreshPeriod = TimeSpan.FromMilliseconds(200);
 
-    /// <summary>畫面保留的紀錄筆數 / Rows retained on screen.</summary>
-    private const int MaxVisibleRows = 200;
+    /// <summary>
+    /// 畫面保留的列數 / Rows retained on screen.
+    /// 一次觸發現在會產生「讀到幾筆條碼」那麼多列,所以列數不再等於觸發次數 ——
+    /// 六道並排的機構下,600 列大約是一百次觸發。
+    /// One trigger now produces as many rows as codes read, so rows no longer equal triggers: with six lanes,
+    /// six hundred rows is roughly a hundred triggers.
+    /// </summary>
+    private const int MaxVisibleRows = 600;
+
+    /// <summary>
+    /// 開機時載入幾次觸發的歷史 / How many past triggers to load at startup.
+    /// 與列數分開計:用列數去查資料庫會讀回六倍的紀錄,渲染完再修剪掉五分之四,白做工。
+    /// Counted separately from rows: querying the database by row count would fetch six times as many records
+    /// and throw four fifths of the rendering away.
+    /// </summary>
+    private const int HistoryTriggers = 100;
 
     private readonly InspectionSequencer _sequencer;
     private readonly RecipeManager _recipes;
@@ -309,8 +323,14 @@ internal sealed class MainForm : Form
     {
         _recordList.Columns.Add("時間 Time", 140);
         _recordList.Columns.Add("機種 Model", 90);
-        _recordList.Columns.Add("條碼 Codes", 190);
-        _recordList.Columns.Add("字符 Characters", 140);
+        // 位置就是實體位置:讀碼器按標籤的物理順序輸出,所以這個編號指得出是哪一道。
+        // 讀不到的那一道會缺號,而缺號本身就是「哪一張沒讀到」的答案。
+        // The position is the physical one: the reader emits codes in the labels' order, so this number
+        // identifies which lane. An unread lane leaves a gap, and the gap is the answer to which label failed.
+        _recordList.Columns.Add("位置 #", 50);
+        _recordList.Columns.Add("條碼 Code", 210);
+        _recordList.Columns.Add("等級 Grade", 60);
+        _recordList.Columns.Add("字符 Characters", 130);
         _recordList.Columns.Add("判定 Judge", 70);
         // 判退原因擺最後且給最寬：不良品的追溯價值有一半在「為什麼退」
         // Widest and last: half the traceability value of a reject is *why*.
@@ -636,7 +656,7 @@ internal sealed class MainForm : Form
         _passCount = pass;
         _failCount = fail;
 
-        var recent = await _database.GetRecentAsync(MaxVisibleRows).ConfigureAwait(true);
+        var recent = await _database.GetRecentAsync(HistoryTriggers).ConfigureAwait(true);
 
         _recordList.BeginUpdate();
         try
@@ -658,7 +678,71 @@ internal sealed class MainForm : Form
             $"已載入歷史紀錄 / Loaded {recent.Count} historical record(s)."));
     }
 
+    /// <summary>
+    /// 把一次觸發展成「一筆條碼一列」/ Spread one trigger across one row per code.
+    ///
+    /// 為什麼不是一次觸發一列 / Why not one row per trigger:
+    /// 六道並排的機構下,一次觸發讀到六筆條碼。併成一列的話「條碼」欄位是一串逗號分隔的
+    /// 六個二十位數字,而等級根本擺不進去 —— 而等級正是這台讀碼器存在的理由。
+    /// With six lanes, one trigger reads six codes. Folded into one row, the code cell is six twenty-digit
+    /// strings joined by commas and there is nowhere to put the grades — and the grades are why this reader
+    /// is here at all.
+    ///
+    /// 判定為什麼仍是「整次觸發」的 / Why the verdict is still the trigger's:
+    /// 資料庫存的是一次觸發一筆紀錄,判定與判退原因屬於那一筆。要逐筆條碼判定,得重算每一筆
+    /// 對配方的符合度,而歷史紀錄沒有存下「當時的配方」—— 重算不出來。
+    /// 因此判定與判退原因只填在該次觸發的第一列,其餘列留空,並以整列同色表示它們屬於同一次觸發。
+    /// 逐筆判定要做的話,是紀錄粒度的改動（一筆條碼一筆紀錄),不是顯示的改動。
+    /// The database stores one record per trigger, and the verdict and reasons belong to it. A per-code
+    /// verdict would mean re-evaluating each code against the recipe, and a stored record does not carry the
+    /// recipe that was in force — so it cannot be recomputed. The verdict and reason therefore appear on the
+    /// trigger's first row only, with the shared colour marking the rows as one trigger. Per-code verdicts
+    /// would be a change of record granularity rather than of display.
+    /// </summary>
     private void InsertRecordRow(InspectionRecord record, bool atTop)
+    {
+        // 完全沒讀到時仍要留一列 / A trigger that read nothing still leaves a row.
+        //
+        // 這是本機構最常見的判退:讀碼器設成「六個都讀到才輸出」,任一張不良就整批回 ERROR,
+        // 於是條碼清單是空的。若「幾筆條碼幾列」照字面執行,這一次觸發會從紀錄裡整個消失 ——
+        // 而那正是最需要留下痕跡的一次。
+        // This is the line's commonest reject: the reader emits only when all six decode, so one bad label
+        // returns ERROR for the batch and the code list is empty. Taking "one row per code" literally would
+        // make that trigger vanish from the log — the very trigger that most needs a trace.
+        var rows = record.CodeResults.Count == 0
+            ? [BuildRow(record, position: null, code: null, grade: null, isFirst: true)]
+            : record.CodeResults
+                .Select((code, ordinal) => BuildRow(
+                    record,
+                    position: code.Index,
+                    code: code.Data,
+                    grade: code.Grade,
+                    isFirst: ordinal == 0))
+                .ToArray();
+
+        // 由新到舊時要整組插在最前面,而組內順序不能倒過來 ——
+        // 逐列 Insert(0) 會讓 #5 排在 #0 上面,而位置編號的用途就是對照實體順序。
+        // Newest-first means inserting the group at the top without reversing it: inserting row by row at zero
+        // would put #5 above #0, and matching the physical order is the whole point of the position column.
+        for (var i = 0; i < rows.Length; i++)
+        {
+            if (atTop)
+            {
+                _recordList.Items.Insert(i, rows[i]);
+            }
+            else
+            {
+                _recordList.Items.Add(rows[i]);
+            }
+        }
+    }
+
+    private static ListViewItem BuildRow(
+        InspectionRecord record,
+        int? position,
+        string? code,
+        int? grade,
+        bool isFirst)
     {
         var item = new ListViewItem(
         [
@@ -666,31 +750,43 @@ internal sealed class MainForm : Form
             // Stored in UTC, shown in local time — the line only reads local time.
             record.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
             record.ModelName,
-            Describe(record.CodeResults, r => r.Data, "(NOREAD)"),
-            Describe(record.CharacterResults, r => r.Text, "(未辨識 no read)"),
-            record.FinalJudge,
-            record.RejectReason ?? string.Empty,
+            position?.ToString(CultureInfo.InvariantCulture) ?? "—",
+            code ?? "(無回報 none)",
+
+            // 「沒有等級」與「等級 0」必須看得出差別:0 是 ISO 刻度上最差的合格等級,
+            // 而空白表示讀碼器回報未評估。兩者判退原因不同,現場該做的事也不同。
+            // "No grade" and "grade 0" have to look different: zero is the worst valid grade on the ISO scale
+            // while blank means the reader reported not-evaluated. They reject for different reasons and send
+            // the line to different places.
+            grade?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
+
+            // 字符與判定屬於整次觸發,只填在第一列 / Characters and the verdict belong to the trigger.
+            isFirst ? Describe(record.CharacterResults, r => r.Text, "(未辨識 no read)") : string.Empty,
+            isFirst ? record.FinalJudge : string.Empty,
+            isFirst ? record.RejectReason ?? string.Empty : string.Empty,
         ]);
 
+        // 整組同色:一次觸發的判定是一個,顏色讓那幾列讀起來是一組而不是各自獨立的判定。
+        // The whole group shares a colour: one trigger has one verdict, and the colour keeps its rows reading
+        // as one group rather than as separate verdicts.
         item.BackColor = record.FinalJudge == Verdict.Pass ? Color.Honeydew : Color.MistyRose;
-
-        if (atTop)
-        {
-            _recordList.Items.Insert(0, item);
-        }
-        else
-        {
-            _recordList.Items.Add(item);
-        }
+        return item;
     }
 
     /// <summary>
     /// 把一次觸發的多筆結果併成一格文字 / Fold one trigger's many results into a single cell.
+    ///
+    /// 只剩字符結果用它。條碼已經改成一筆一列,而字符仍屬於整次觸發 ——
+    /// IV4 導入後若證實它也是「一次觸發多個區域」,那時要考慮的是區域也逐列展開。
+    /// Only the character results still use this. Codes are one per row now, while characters still belong to
+    /// the trigger; if the IV4 turns out to report many regions per trigger, spreading those across rows too
+    /// becomes the next question.
+    ///
     /// 空清單與「有結果但內容是空的」必須看得出差別 —— 前者是感測器什麼都沒回,
     /// 後者是回了卻解不出來,現場的排查方向完全不同。
-    /// An empty list and "a result arrived but carried nothing" must look different: the
-    /// first means the sensor reported nothing at all, the second that it reported and
-    /// could not decode. They send the operator looking in different places.
+    /// An empty list and "a result arrived but carried nothing" must look different: the first means the
+    /// sensor reported nothing at all, the second that it reported and could not decode. They send the
+    /// operator looking in different places.
     /// </summary>
     private static string Describe<T>(IReadOnlyList<T> results, Func<T, string?> select, string emptyValue)
         => results.Count == 0
