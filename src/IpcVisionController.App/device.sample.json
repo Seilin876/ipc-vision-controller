@@ -192,7 +192,18 @@
     "GradeField": 1
   },
 
-  // ── 以下這一段在 IV4 導入之前請整段刪除 / Delete this whole section until the IV4 arrives ──
+  // ── 字符檢測站 / The character-verification station ──
+  //
+  // IV4 已到貨並接上。尚未導入時整段刪掉（不要留一段空的），此時配方的字符區域數要設 0。
+  // The IV4 has arrived and is attached. While absent, delete this whole section rather than leaving an
+  // empty one, and set the recipe's region count to 0.
+  //
+  // 加上這一段之後，最外層的 InspectionStationDistancePulses 就「必須」填寫，否則程式拒絕啟動。
+  // 導入期建議先填 0（表示兩台瞄同一位置），IV4 第一次觸發就會動，馬上看得到電文；
+  // 量好格式之後再改成實際距離。
+  // Adding this section makes the top-level InspectionStationDistancePulses required, or the program refuses
+  // to start. During commissioning set it to 0, meaning both sensors on one position, so the IV4 fires on the
+  // very first trigger and its frame appears at once; put the real distance in once the format is settled.
   "CharacterVerifier": {
     // Keyence IV4。與讀碼器是不同的裝置，位址、埠、命令、欄位全部各自獨立設定。
     // 不可與 CodeReader 填同一個位址加埠 —— 那幾乎一定是複製後忘了改，
@@ -200,21 +211,60 @@
     // A different device from the reader, with its own address, port, command and fields. It must
     // not share an address and port with CodeReader: that is almost always an unedited copy, and
     // since most industrial devices accept only one link, one of them is refused at initialise.
-    "Host": "192.168.1.11",
+    //
+    // 以下三項為實機確認值 / Confirmed against the hardware:
+    "Host": "192.168.1.41",
     "Port": 8500,
     "TriggerCommand": "T1",
+
+    // 以下為「待實機確認」/ Still unconfirmed:
+    //
+    // 結束字元尚未確認。填錯的表徵是「埠連上了但在逾時內未回應」——
+    // 驅動會一直等結束字元等不到。若出現該訊息而埠確實通，依序試 Lf、CrLf。
+    // The terminator is not yet confirmed. Getting it wrong presents as "the port opened but nothing answered
+    // in time", because the driver waits for a terminator that never arrives. If that message appears while
+    // the port is demonstrably open, try Lf and then CrLf.
     "Terminator": "Cr",
+
+    // 分隔字元尚未確認。SR-X300 的電文是「兩層」結構（記錄之間 ','，記錄內 ':'），
+    // 而 IV4 同廠牌、設定軟體同一套邏輯，很可能也是兩層。
+    // 目前的 CharacterFrameReader 只實作「單層」—— 那個假設在讀碼器身上已經錯過一次，
+    // 讓第一筆之後的結果整批消失且不報錯。請務必先擷取實機電文再定，不要沿用此預設值。
+    // The delimiter is not yet confirmed. The SR-X300's frame turned out to be two levels — commas between
+    // records and colons within one — and the IV4 is the same make with the same setup software, so it may
+    // well be two levels too. CharacterFrameReader currently implements only the flat model, an assumption
+    // that already failed once on the reader and silently dropped everything past the first result. Capture a
+    // real frame before settling this rather than trusting the default.
     "FieldDelimiter": ",",
+
     "ConnectTimeoutMs": 5000,
+
+    // IV4 端也要設「檢測時限」，理由與讀碼器相同：辨識不到要「回答」而不是沉默。
+    // 沉默會走到本項逾時 → 設備故障 → 停線，而字符辨識不到應該是判退。
+    // The IV4 needs a detection time limit of its own, for the same reason as the reader: a failure to
+    // recognise has to be answered rather than met with silence. Silence reaches this timeout, becomes an
+    // equipment fault and stops the line, when an unrecognised character should be a reject.
     "ResponseTimeoutMs": 2000,
+
+    // ⚠ 這兩項是獨立設定，不會沿用 SR-X300 的覆寫值。
+    // 讀碼器因為 no-read 輸出 "ERROR"（以 "ER" 開頭）而停用了 ErrorPrefix；IV4 仍是預設 "ER"。
+    // 若 IV4 辨識失敗的輸出也以 "ER" 開頭，一張字符不良的標籤會被判成設備異常而停線 ——
+    // 而那應該是判退。請刻意遮掉字符量一次失敗電文，再決定這兩項。
+    // These two are configured independently and do not inherit the SR-X300's overrides. The reader disabled
+    // ErrorPrefix because its no-read token "ERROR" starts with "ER"; the IV4 still defaults to "ER". If the
+    // IV4's failure output also starts with "ER", one label with bad characters becomes an equipment fault and
+    // stops the line, when it should be a reject. Obscure the characters deliberately, capture the failure
+    // frame, and then decide both values.
     "ErrorPrefix": "ER",
     "EmptyTokens": ["NG", "NOREAD", "----"],
 
     // 字符檢測各區域文字所在欄位。筆數要與配方的 ExpectedCharacterRegionCount 一致。
-    // 不可為空 —— 還沒有 IV4 的話請把整個 CharacterVerifier 段落刪掉，而不是留空陣列。
+    // 目前的值是假設，必須以實機電文校正 —— 索引錯誤的表徵是「每張標籤都判退」，
+    // 那與印刷不良、與感測器沒對焦看起來一模一樣。
     // Fields holding each OCR region's text; the count should match the recipe's
-    // ExpectedCharacterRegionCount. It must not be empty: with no IV4 yet, delete the whole
-    // CharacterVerifier section rather than leaving an empty array.
+    // ExpectedCharacterRegionCount. These values are an assumption and must be corrected against a real
+    // frame: a wrong index presents as "every label rejects", indistinguishable from bad print and from a
+    // sensor out of focus.
     "CharacterTextFields": [1, 2]
   }
 }
